@@ -74,49 +74,83 @@ BLOCKED_DOMAINS: frozenset[str] = frozenset({
 # Used only as a lightweight sanity check to decide whether a search result is
 # plausible enough to spend a crawl attempt on.  This is NOT the lead score.
 #
-# Split into *identity* signals (strongly indicate the entity IS an agency) and
-# *topical* signals (indicate the content is about AI/automation but the entity
-# might be a blog, forum, or job board).  Identity signals can override
-# negative-pattern matches; topical signals cannot.
-_IDENTITY_SIGNALS: tuple[str, ...] = (
+# Split into *strong* signals (sufficient alone to accept, can override
+# negative-pattern matches) and *weak* signals (topical AI terms that support
+# a decision but cannot alone prove the entity is an agency).
+#
+# Strong signals indicate the entity IS an agency/company selling technical
+# services.  Weak signals indicate the content is ABOUT AI/automation but the
+# entity might be a blog, news site, forum, or job board.
+_STRONG_SIGNALS: tuple[str, ...] = (
     "agency", "consultancy", "consulting",
-    "software development", "product studio",
-    "custom software", "ai solutions",
+    "development company", "software development",
+    "ai development services", "ai consulting", "ai consultancy",
+    "ai solutions", "custom software", "product studio",
+    "we build", "we develop", "our services",
+    "for clients", "client solutions",
+    "implementation services", "engineering services",
 )
 
-_TOPICAL_SIGNALS: tuple[str, ...] = (
+_WEAK_SIGNALS: tuple[str, ...] = (
     "ai development", "ai engineering", "generative ai",
     "llm development", "automation", "ai agents",
     "rag", "machine learning", "ai", "artificial intelligence",
     "llm",
 )
 
-# URL path segments that indicate a legitimate agency content page rather than
-# a non-agency listing.  If the domain is not blocked and the path contains one
-# of these, we lean towards accepting even without strong title/snippet signals
-# because the domain itself is the prospect.
-_AGENCY_PATH_HINTS: tuple[str, ...] = (
-    "about", "services", "service", "solution", "solutions",
-    "ai", "team", "contact", "work", "case-studies", "case_studies",
-    "blog", "insights", "portfolio", "projects",
+# URL path *segments* (not substrings) that indicate a legitimate agency
+# content page.  The path is split on "/" and each segment is checked for
+# exact membership.  This prevents false matches like "ai" inside "mail" or
+# "details".  Path segments support acceptance only when combined with at
+# least one weak topical signal; they are not sufficient alone.
+_AGENCY_PATH_SEGMENTS: frozenset[str] = frozenset({
+    "about", "service", "services", "solution", "solutions",
+    "team", "contact", "work", "case-studies", "case_studies",
+    "portfolio", "projects", "blog", "insights",
+})
+
+# Patterns that strongly indicate a non-agency editorial/listicle result.
+# These are checked case-insensitively against the title.
+#
+# The regex is structured to catch common editorial discovery patterns
+# without rejecting real agencies whose names might contain "Best" or "Top":
+#   - "Top N ..." / "Best N ..." (numbered listicles)
+#   - "Top/Best ... <plural-entity>" (e.g. "Top AI Consulting Firms")
+#   - "N <adj> <plural-entity>" (e.g. "10 AI Agencies")
+#   - "List of ..." / "Directory of ..."
+#   - "Guide to ... <plural-entity>"
+#   - "<plural-entity> to Watch"
+#
+# Plural entity nouns are used (not singular) so "Best AI Agency" (a company
+# name) does NOT match, but "Best AI Agencies" (a listicle) does.
+_PLURAL_ENTITIES = r"agencies|companies|firms|startups|consultancies|platforms"
+_LISTICLE_TITLE_RE = re.compile(
+    # "Top N ..." / "Best N ..." / "N Best/Top ..."
+    r"\b(top\s+\d+|best\s+\d+|\d+\s+(best|top))\b"
+    # "Top/Best ... <plural-entity>" within 40 chars
+    rf"|\b(top|best)\b.{{0,40}}\b({_PLURAL_ENTITIES})\b"
+    # "N <word> <plural-entity>" e.g. "10 AI Agencies"
+    rf"|\b\d+\s+\w+\s+({_PLURAL_ENTITIES})\b"
+    # "List of ..." / "Directory of ..."
+    r"|\b(list\s+of|directory\s+of)\b"
+    # "Guide to ... <plural-entity>"
+    rf"|\bguide\s+to\b.{{0,40}}\b({_PLURAL_ENTITIES})\b"
+    # "<plural-entity> to Watch"
+    rf"|\b({_PLURAL_ENTITIES})\s+to\s+watch\b",
+    re.I,
 )
 
-# Patterns that strongly indicate a non-agency result when found in the
-# title.  These are checked case-insensitively as whole-word-ish matches.
+# Forum/community thread title patterns.
 _FORUM_TITLE_RE = re.compile(
     r"\b(discussion|thread|forum|community|q&a|question|answer|"
     r"reddit|quora|stack\s*overflow|hacker\s*news)\b",
     re.I,
 )
+
+# Job listing title patterns.
 _JOB_TITLE_RE = re.compile(
     r"\b(job|jobs|hiring|career|careers|vacanc|position|role|"
     r"apply|salary|engineer\s+wanted|we'?re\s+hiring)\b",
-    re.I,
-)
-_LISTICLE_TITLE_RE = re.compile(
-    r"\b(top\s+\d+|best\s+\d+|\d+\s+(best|top|agencies|companies|firms|"
-    r"startups|tools|platforms))\b|"
-    r"\b(list\s+of|directory\s+of)\b",
     re.I,
 )
 
@@ -164,6 +198,22 @@ def is_blocked_domain(domain: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Path segment helper
+# ---------------------------------------------------------------------------
+
+def _has_path_hint(path: str) -> bool:
+    """Return True if any URL path segment matches a known agency page hint.
+
+    The path is split on ``/`` and each non-empty segment is checked for exact
+    membership in :data:`_AGENCY_PATH_SEGMENTS`.  This prevents false matches
+    like ``"ai"`` inside ``"mail"`` or ``"details"`` that substring matching
+    would produce.
+    """
+    segments = [s for s in path.lower().split("/") if s]
+    return any(seg in _AGENCY_PATH_SEGMENTS for seg in segments)
+
+
+# ---------------------------------------------------------------------------
 # Candidate evaluation
 # ---------------------------------------------------------------------------
 
@@ -190,6 +240,15 @@ def evaluate_candidate(hit) -> CandidateDecision:
     - ``insufficient-agency-signal``
 
     Accept reason is always ``accepted``.
+
+    Acceptance rules (in priority order):
+
+    1. Hard rejects: blocked domain, non-http(s) URL, file extension.
+    2. Listicle titles are always rejected.
+    3. Forum/job-board titles are rejected unless a strong signal is present.
+    4. Strong agency identity signal in title/snippet → accept.
+    5. Weak topical signal + agency URL path segment → accept.
+    6. Otherwise → reject ``insufficient-agency-signal``.
     """
     domain = normalize_domain(hit.url)
 
@@ -213,9 +272,8 @@ def evaluate_candidate(hit) -> CandidateDecision:
 
     combined = f"{hit.title} {hit.snippet}".strip().lower()
 
-    has_identity = any(sig in combined for sig in _IDENTITY_SIGNALS)
-    has_topical = any(sig in combined for sig in _TOPICAL_SIGNALS)
-    has_positive = has_identity or has_topical
+    has_strong = any(sig in combined for sig in _STRONG_SIGNALS)
+    has_weak = any(sig in combined for sig in _WEAK_SIGNALS)
 
     # --- negative pattern checks -------------------------------------------
     # Listicles are always rejected (a "Top 10 AI Agencies" article is never
@@ -227,27 +285,23 @@ def evaluate_candidate(hit) -> CandidateDecision:
     # identity signals indicating the entity itself is an agency (e.g. a real
     # agency's careers page or a company blog post that happens to mention
     # "discussion").
-    if not has_identity:
+    if not has_strong:
         if _FORUM_TITLE_RE.search(hit.title):
             return CandidateDecision(False, "forum", domain)
         if _JOB_TITLE_RE.search(hit.title):
             return CandidateDecision(False, "job-board", domain)
 
     # --- accept heuristics --------------------------------------------------
-    # If we have positive agency signals in title/snippet, accept.
-    if has_positive:
+    # Strong agency identity signals in title/snippet are sufficient to accept.
+    if has_strong:
         return CandidateDecision(True, "accepted", domain)
 
-    # If the URL path looks like a legitimate agency content page, accept
-    # conservatively (the domain is the prospect; the crawler will root it).
-    path_lower = parsed.path.lower()
-    if any(hint in path_lower for hint in _AGENCY_PATH_HINTS):
+    # Weak (topical) signals plus a legitimate agency URL path segment are
+    # sufficient to accept.  The path segment provides structural evidence
+    # that the domain is a company site, while the topical signal confirms
+    # the content is relevant.  Neither alone is sufficient.
+    if has_weak and _has_path_hint(parsed.path):
         return CandidateDecision(True, "accepted", domain)
 
-    # Fallback: if the domain is not blocked and has a plausible TLD structure
-    # (at least one dot), accept conservatively.  We prefer false-accepts over
-    # false-rejects at this stage; the crawl + score will filter further.
-    if "." in domain and len(domain) > 4:
-        return CandidateDecision(True, "accepted", domain)
-
+    # No sufficient evidence that this is an agency prospect.
     return CandidateDecision(False, "insufficient-agency-signal", domain)

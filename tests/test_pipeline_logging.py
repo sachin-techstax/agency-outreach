@@ -45,11 +45,20 @@ STRONG_TEXT = (
 
 
 def _setup_search(domains: list[str], monkeypatch):
-    """Patch search_serper to return hits for the given domains."""
+    """Patch search_serper to return hits for the given domains.
+
+    Each hit includes strong agency identity signals in the title/snippet so
+    it passes the pre-crawl candidate quality filter.
+    """
     from app.search import SearchHit
 
     hits = [
-        SearchHit(title=d, url=f"https://{d}", snippet="", query="q")
+        SearchHit(
+            title=f"{d} - AI Development Agency",
+            url=f"https://{d}",
+            snippet="We build AI agents and custom software for clients.",
+            query="q",
+        )
         for d in domains
     ]
 
@@ -449,7 +458,7 @@ def test_one_search_fails_another_succeeds_continues(tmp_path, monkeypatch):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("serper transient error")
-        return [SearchHit(title="good.com", url="https://good.com", snippet="", query=query)]
+        return [SearchHit(title="Good AI Agency", url="https://good.com", snippet="We build AI solutions for clients.", query=query)]
 
     monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
     monkeypatch.setattr(
@@ -857,3 +866,100 @@ def test_dedup_by_normalized_domain(tmp_path, monkeypatch):
     assert result["raw_candidate_domains"] == 1
     assert result["candidate_domains"] == 1
     assert result["attempted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# R1-1: Same-domain rejection must not poison later acceptable hits.
+# ---------------------------------------------------------------------------
+
+
+def test_same_domain_rejected_then_accepted(tmp_path, monkeypatch):
+    """R1-7 test A: A rejected first URL must not permanently reject the
+    domain if a later hit from the same domain is acceptable."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(
+            title="Top 10 AI Agencies",
+            url="https://realagency.com/top-10-ai-agencies",
+            snippet="A list of the best AI agencies.",
+            query="q",
+        ),
+        SearchHit(
+            title="Generative AI Development Services",
+            url="https://realagency.com/services/generative-ai",
+            snippet="We build AI agents and LLM applications for clients.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "crawl_company",
+        lambda url: _make_site(STRONG_TEXT, "realagency.com"),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=1)
+
+    # The domain was observed once, the listicle was rejected, but the services
+    # page was accepted.  So the domain is NOT counted as rejected.
+    assert result["raw_candidate_domains"] == 1
+    assert result["rejected_candidate_domains"] == 0
+    assert result["candidate_domains"] == 1
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+
+
+def test_same_domain_two_rejected(tmp_path, monkeypatch):
+    """R1-7 test B: Two rejected URLs from the same domain → raw=1,
+    rejected=1, eligible=0."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(
+            title="Top 10 AI Agencies",
+            url="https://realagency.com/top-10-ai-agencies",
+            snippet="A list of the best AI agencies.",
+            query="q",
+        ),
+        SearchHit(
+            title="Discussion: AI Tools",
+            url="https://realagency.com/thread/123",
+            snippet="Join the community discussion about AI tools.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+
+    result = run_pipeline(limit=1)
+
+    assert result["raw_candidate_domains"] == 1
+    assert result["rejected_candidate_domains"] == 1
+    assert result["candidate_domains"] == 0
+    assert result["attempted"] == 0

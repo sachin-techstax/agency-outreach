@@ -61,7 +61,6 @@ def _discover_candidates(target: int) -> tuple[dict, dict]:
     """
     candidates: dict[str, object] = {}
     raw_domains: set[str] = set()
-    rejected_domains: set[str] = set()
     search_attempts = 0
     search_success = 0
     search_failed = 0
@@ -79,21 +78,32 @@ def _discover_candidates(target: int) -> tuple[dict, dict]:
             domain = normalize_domain(hit.url)
             if not domain:
                 continue
-            if domain in raw_domains:
-                continue
+            # Record every unique domain we observe, even if we later reject
+            # it -- raw_candidate_domains counts all observed domains.
             raw_domains.add(domain)
 
+            # If we already accepted a hit for this domain, skip later hits.
+            # This deduplicates by normalized domain.
+            if domain in candidates:
+                continue
+
+            # Evaluate the current hit.  A rejected hit does NOT permanently
+            # reject the domain -- a later hit from the same domain may be
+            # acceptable (e.g. a listicle blog post followed by a services page).
             decision = evaluate_candidate(hit)
             if not decision.accepted:
-                rejected_domains.add(domain)
                 logger.debug("Rejected %s: %s", domain, decision.reason)
                 continue
-            if domain not in candidates:
-                candidates[domain] = hit
+
+            # First acceptable hit wins.
+            candidates[domain] = hit
             if len(candidates) >= target * 3:
                 break
         if len(candidates) >= target * 3:
             break
+
+    # Domains that were observed but never accepted.
+    rejected_domains = raw_domains - set(candidates.keys())
 
     logger.info(
         "Discovery searches: attempted=%d success=%d failed=%d",
