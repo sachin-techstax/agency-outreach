@@ -1,0 +1,21 @@
+services:
+  outreach:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: agency-outreach:local
+    env_file:
+      - .env
+    environment:
+      DB_PATH: /data/agency_outreach.db
+      GMAIL_CLIENT_SECRET: /secrets/client_secret.json
+      GMAIL_TOKEN_FILE: /secrets/token.json
+    volumes:
+      - ./data:/data
+      - ./secrets:/secrets
+    working_dir: /workspace
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: ["--help"]
