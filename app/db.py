@@ -24,7 +24,8 @@ PROTECTED_STATUSES = frozenset({
 })
 
 # Fields that must never be overwritten by an automated upsert when the
-# existing lead is in a protected status.
+# existing lead is in a protected status.  This includes both workflow state
+# and the contact information used by the human workflow.
 _PROTECTED_FIELDS = frozenset({
     "status",
     "subject",
@@ -32,6 +33,11 @@ _PROTECTED_FIELDS = frozenset({
     "gmail_draft_id",
     "last_contact_at",
     "followup_due_at",
+    "contact_email",
+    "contact_source",
+    "contact_name",
+    "contact_role",
+    "contact_quality",
 })
 
 # Fields that represent generated/contact state and should be cleared when a
@@ -201,32 +207,20 @@ def upsert_lead(data: dict) -> int:
 
 
 def update_lead(lead_id: int, **updates) -> None:
-    """Update specific fields on a lead, respecting workflow-state protection.
+    """Update specific fields on a lead.
 
-    If the lead is in a protected status, protected fields (status, subject,
-    draft, gmail_draft_id, last_contact_at, followup_due_at) are silently
-    dropped from the update.
+    This is the explicit workflow mutation primitive, used by CLI commands
+    (approve, reject, gmail-drafts, mark-sent, etc.).  It does NOT enforce
+    workflow-state protection — that is the responsibility of the automated
+    discovery path (``upsert_lead``).
+
+    Explicit workflow transitions such as ``drafted -> approved``,
+    ``approved -> gmail_drafted``, and ``gmail_drafted -> sent`` must work
+    without restriction here.
     """
     if not updates:
         return
     init_db()
-    # Check if the lead is in a protected state
-    with conn() as db:
-        row = db.execute("SELECT status FROM leads WHERE id=?", (lead_id,)).fetchone()
-    if row and is_workflow_state_protected(row["status"]):
-        protected_updates = {
-            k: v for k, v in updates.items() if k in _PROTECTED_FIELDS
-        }
-        if protected_updates:
-            logger.debug(
-                "Dropping protected field updates for lead id=%s status=%s: %s",
-                lead_id, row["status"], ",".join(protected_updates.keys()),
-            )
-        updates = {
-            k: v for k, v in updates.items() if k not in _PROTECTED_FIELDS
-        }
-        if not updates:
-            return  # Nothing left to update
     updates["updated_at"] = now_iso()
     cols = list(updates)
     values = [updates[c] for c in cols] + [lead_id]
@@ -254,6 +248,13 @@ def update_lead(lead_id: int, **updates) -> None:
 def get_lead(lead_id: int):
     with conn() as db:
         return db.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+
+
+def get_lead_by_domain(domain: str):
+    """Return the existing lead row for *domain*, or None."""
+    init_db()
+    with conn() as db:
+        return db.execute("SELECT * FROM leads WHERE domain=?", (domain,)).fetchone()
 
 
 def list_leads(status: str | None = None, min_score: int = 0, limit: int = 100):

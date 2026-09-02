@@ -1238,8 +1238,8 @@ def _get_lead_row(db_path, domain):
 
 
 def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
-    """R1-3 Test A: A sent lead must not be overwritten by a below-threshold
-    re-qualification run."""
+    """R1-3 Test A / R2-4: A sent lead must not be overwritten by a
+    below-threshold re-qualification run."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "sent")
     _setup_search(["example.ai"], monkeypatch)
@@ -1254,10 +1254,13 @@ def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
 
     result = run_pipeline(limit=1)
 
-    # The run should succeed — below-threshold, no LLM
+    # The run should succeed — protected lead detected, no LLM
     assert result["attempted"] == 1
-    assert result["below_score"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
     assert result["llm_analysis_calls"] == 0
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
     # Protected fields must be unchanged
@@ -1267,6 +1270,11 @@ def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
     assert row["gmail_draft_id"] == "gmail-123"
     assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
     assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
+    # Contact state must also be preserved (R2-2)
+    assert row["contact_email"] == "founder@old.com"
+    assert row["contact_source"] == "website"
+    assert row["contact_role"] == "Founder"
+    assert row["contact_quality"] == "high"
 
 
 def test_rerun_drafted_downgraded_clears_stale_state(tmp_path, monkeypatch):
@@ -1301,7 +1309,7 @@ def test_rerun_drafted_downgraded_clears_stale_state(tmp_path, monkeypatch):
 
 
 def test_rerun_approved_lead_preserved(tmp_path, monkeypatch):
-    """R1-3 Test C: An approved lead must survive a re-qualification run."""
+    """R1-3 Test C / R2-4: An approved lead must survive a re-qualification run."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "approved")
     _setup_search(["example.ai"], monkeypatch)
@@ -1317,14 +1325,20 @@ def test_rerun_approved_lead_preserved(tmp_path, monkeypatch):
     result = run_pipeline(limit=1)
 
     assert result["attempted"] == 1
-    assert result["below_score"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
     assert result["llm_analysis_calls"] == 0
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
     assert row["status"] == "approved"
     assert row["subject"] == "Old subject"
     assert row["draft"] == "Old draft body"
     assert row["gmail_draft_id"] == "gmail-123"
+    # Contact state preserved (R2-2)
+    assert row["contact_email"] == "founder@old.com"
+    assert row["contact_quality"] == "high"
 
 
 def test_rerun_gmail_drafted_lead_preserved(tmp_path, monkeypatch):
@@ -1339,10 +1353,179 @@ def test_rerun_gmail_drafted_lead_preserved(tmp_path, monkeypatch):
 
     result = run_pipeline(limit=1)
 
-    assert result["below_score"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
     assert row["status"] == "gmail_drafted"
     assert row["subject"] == "Old subject"
     assert row["draft"] == "Old draft body"
     assert row["gmail_draft_id"] == "gmail-123"
+    assert row["contact_email"] == "founder@old.com"
+
+
+# ---------------------------------------------------------------------------
+# R2-5: Explicit workflow transitions must work via update_lead()
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_transition_drafted_to_approved(tmp_path):
+    """R2-5 Test A: drafted -> approved must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "drafted")
+    # Get the lead ID
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    update_lead(lead_id, status="approved")
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "approved"
+
+
+def test_workflow_transition_approved_to_gmail_drafted(tmp_path):
+    """R2-5 Test B: approved -> gmail_drafted must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "approved")
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    update_lead(lead_id, gmail_draft_id="gmail-456", status="gmail_drafted")
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "gmail_drafted"
+    assert updated["gmail_draft_id"] == "gmail-456"
+
+
+def test_workflow_transition_gmail_drafted_to_sent(tmp_path):
+    """R2-5 Test C: gmail_drafted -> sent must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "gmail_drafted")
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    sent_at = "2026-02-01T00:00:00+00:00"
+    followup = "2026-02-08T00:00:00+00:00"
+    update_lead(
+        lead_id,
+        status="sent",
+        last_contact_at=sent_at,
+        followup_due_at=followup,
+    )
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "sent"
+    assert updated["last_contact_at"] == sent_at
+    assert updated["followup_due_at"] == followup
+    # gmail_draft_id should still be there from the insert
+    assert updated["gmail_draft_id"] == "gmail-123"
+
+
+# ---------------------------------------------------------------------------
+# R2-6: Protected qualified rediscovery skips LLM and draft
+# ---------------------------------------------------------------------------
+
+
+def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypatch):
+    """R2-6: An existing protected lead (sent) that still scores >= 70 must
+    NOT trigger analyze_agency or draft_outreach.  Existing draft/contact/
+    status must remain unchanged."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(
+        db_path, "example.ai", "sent",
+        draft="Human-approved draft",
+        contact_email="founder@example.com",
+        contact_quality="high",
+        score=80,
+    )
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+
+    analysis_called = {"n": 0}
+    draft_called = {"n": 0}
+
+    def fail_if_analysis(*a, **k):
+        analysis_called["n"] += 1
+        raise AssertionError("analyze_agency should NOT be called for protected lead")
+
+    def fail_if_draft(*a, **k):
+        draft_called["n"] += 1
+        raise AssertionError("draft_outreach should NOT be called for protected lead")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", fail_if_analysis)
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fail_if_draft)
+
+    result = run_pipeline(limit=1)
+
+    # Protected lead detected and skipped
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
+    # No LLM calls, no drafts
+    assert result["llm_analysis_calls"] == 0
+    assert result["outreach_draft_calls"] == 0
+    assert result["outreach_drafts_generated"] == 0
+    assert result["drafted"] == 0
+    # Invariant holds
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+    # analyze_agency and draft_outreach were NOT called
+    assert analysis_called["n"] == 0
+    assert draft_called["n"] == 0
+
+    row = _get_lead_row(db_path, "example.ai")
+    # All protected fields unchanged
+    assert row["status"] == "sent"
+    assert row["draft"] == "Human-approved draft"
+    assert row["contact_email"] == "founder@example.com"
+    assert row["contact_quality"] == "high"
+    assert row["gmail_draft_id"] == "gmail-123"
+    assert row["subject"] == "Old subject"
+    assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
+
+
+def test_protected_qualified_rediscovery_refreshes_score(tmp_path, monkeypatch):
+    """R2-6: A protected lead's deterministic score/score_reasons MAY refresh
+    even though LLM and draft are skipped."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(
+        db_path, "example.ai", "sent",
+        score=50,
+        score_reasons="[]",
+    )
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "draft_outreach",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["protected_existing"] == 1
+    assert result["llm_analysis_calls"] == 0
+
+    row = _get_lead_row(db_path, "example.ai")
+    # Score may refresh
+    assert row["score"] >= 70
+    # But status is still sent
+    assert row["status"] == "sent"

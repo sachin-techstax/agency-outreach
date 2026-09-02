@@ -9,7 +9,7 @@ from .commercial_fit import score_commercial_fit
 from .company_identity import extract_company_name
 from .config import settings
 from .contacts import discover_contact
-from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead
+from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead_by_domain
 from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
 from .scrape import crawl_company, domain_of, root_url
@@ -139,6 +139,8 @@ def run(limit: int | None = None) -> dict:
     llm_skipped_below_threshold = 0 # candidates that skipped LLM entirely
     outreach_draft_calls = 0        # draft_outreach invocations attempted
     outreach_drafts_generated = 0   # draft_outreach calls that succeeded
+    protected_existing = 0          # existing leads found in protected state
+    protected_outreach_skipped = 0  # protected leads where outreach was skipped
 
     for domain, hit in candidates.items():
         if attempted >= target:
@@ -161,6 +163,30 @@ def run(limit: int | None = None) -> dict:
                 domain, fit.category, fit.score,
             )
             logger.info("%s score: %d category: %s", domain, fit.score, fit.category)
+
+            # --- check for existing protected lead ---
+            existing = get_lead_by_domain(site["domain"])
+            if existing and is_workflow_state_protected(existing["status"]):
+                protected_existing += 1
+                protected_outreach_skipped += 1
+                logger.info(
+                    "Existing protected lead %s status=%s; preserving workflow "
+                    "state and skipping outreach regeneration",
+                    domain, existing["status"],
+                )
+                # Refresh only safe deterministic research metadata.
+                # upsert_lead() will drop protected fields automatically.
+                upsert_lead({
+                    "company": company,
+                    "domain": site["domain"],
+                    "website": site["root"],
+                    "source_query": hit.query,
+                    "source_url": hit.url,
+                    "score": fit.score,
+                    "score_reasons": json.dumps(fit.reasons),
+                })
+                processed += 1
+                continue
 
             # --- below threshold: persist lightweight lead, skip LLM ---
             if fit.score < settings.min_score:
@@ -264,6 +290,8 @@ def run(limit: int | None = None) -> dict:
         "llm_skipped_below_threshold": llm_skipped_below_threshold,
         "outreach_draft_calls": outreach_draft_calls,
         "outreach_drafts_generated": outreach_drafts_generated,
+        "protected_existing": protected_existing,
+        "protected_outreach_skipped": protected_outreach_skipped,
         "duration_s": round(batch_elapsed, 1),
         "failures": failures,
     }
@@ -306,6 +334,8 @@ def _log_summary(summary: dict) -> None:
         f"Skipped below threshold:       {summary['llm_skipped_below_threshold']}",
         f"Outreach calls (attempted):    {summary['outreach_draft_calls']}",
         f"Outreach drafts generated:     {summary['outreach_drafts_generated']}",
+        f"Protected existing:            {summary['protected_existing']}",
+        f"Protected outreach skipped:    {summary['protected_outreach_skipped']}",
         "",
         f"Duration:             {summary['duration_s']}s",
     ]
