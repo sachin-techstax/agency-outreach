@@ -284,6 +284,55 @@ make test
 make help
 ```
 
+## Production deployment
+
+Production code deployment is automated through GitHub Actions after a successful push or merge to `master`. The workflow verifies the exact revision in Docker first, then connects to the Hetzner host over pinned-key SSH and deploys that exact Git SHA into:
+
+```text
+/srv/agency-outreach
+```
+
+Required GitHub repository secrets:
+
+```text
+HETZNER_HOST
+HETZNER_USER
+HETZNER_SSH_KEY
+HETZNER_KNOWN_HOSTS
+```
+
+The workflow deliberately does **not** run discovery, create Gmail drafts, send email, or install a scheduler. Outreach execution remains manual while lead quality is being tuned.
+
+A successful deploy:
+
+1. records the previous server SHA;
+2. fetches `origin`;
+3. verifies the triggering SHA exists in `origin/master` history;
+4. resets the production checkout to that exact SHA;
+5. rebuilds the Docker image;
+6. smoke-tests `outreach --help`;
+7. records the deployed revision in `data/deployed_sha`.
+
+Inspect the deployed revision on the host with:
+
+```bash
+cd /srv/agency-outreach
+git rev-parse HEAD
+cat data/deployed_sha
+```
+
+If the new checkout, build, or smoke test fails after the checkout changes, the deployment script resets to the previously running SHA, rebuilds it, and smoke-tests the previous CLI. A rollback failure leaves the GitHub Actions job failed and requires manual intervention.
+
+Runtime state is intentionally outside Git tracking and is preserved across deployments:
+
+```text
+.env
+data/
+secrets/
+```
+
+Do not add `git clean` to the production deployment path.
+
 ## Suggested daily workflow
 
 ```text
