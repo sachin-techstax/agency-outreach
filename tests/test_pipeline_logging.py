@@ -45,11 +45,20 @@ STRONG_TEXT = (
 
 
 def _setup_search(domains: list[str], monkeypatch):
-    """Patch search_serper to return hits for the given domains."""
+    """Patch search_serper to return hits for the given domains.
+
+    Each hit includes strong agency identity signals in the title/snippet so
+    it passes the pre-crawl candidate quality filter.
+    """
     from app.search import SearchHit
 
     hits = [
-        SearchHit(title=d, url=f"https://{d}", snippet="", query="q")
+        SearchHit(
+            title=f"{d} - AI Development Agency",
+            url=f"https://{d}",
+            snippet="We build AI agents and custom software for clients.",
+            query="q",
+        )
         for d in domains
     ]
 
@@ -449,7 +458,7 @@ def test_one_search_fails_another_succeeds_continues(tmp_path, monkeypatch):
         call_count["n"] += 1
         if call_count["n"] == 1:
             raise RuntimeError("serper transient error")
-        return [SearchHit(title="good.com", url="https://good.com", snippet="", query=query)]
+        return [SearchHit(title="Good AI Agency", url="https://good.com", snippet="We build AI solutions for clients.", query=query)]
 
     monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
     monkeypatch.setattr(
@@ -655,3 +664,302 @@ def test_cli_banner_shows_env_log_level_without_verbose(tmp_path, monkeypatch, c
     _startup_banner(effective_limit=5, effective_log_level="INFO")
     out = capsys.readouterr().out
     assert "Log level:        INFO" in out
+
+
+# ---------------------------------------------------------------------------
+# Candidate quality: Reddit regression + discovery filtering.
+# ---------------------------------------------------------------------------
+
+
+def test_reddit_regression_rejected_before_attempt(tmp_path, monkeypatch, caplog):
+    """The exact real-world bug: Reddit appears first in search results and
+    consumes the only --limit 1 attempt.  After the fix, Reddit must be
+    rejected by candidate filtering BEFORE any processing attempt, and the
+    real agency gets the attempt instead."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    # Simulate Serper returning Reddit first, then a real agency.
+    hits = [
+        SearchHit(
+            title="Best AI tools - Reddit",
+            url="https://www.reddit.com/r/MachineLearning/comments/abc",
+            snippet="Discussion about AI tools",
+            query="q",
+        ),
+        SearchHit(
+            title="Real AI Agency - Generative AI Development & Automation",
+            url="https://real-ai-agency.example/services",
+            snippet="We build LLM applications, AI agents and custom software.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "crawl_company",
+        lambda url: _make_site(STRONG_TEXT, "real-ai-agency.example"),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="pipeline"):
+        result = run_pipeline(limit=1)
+
+    # Reddit was rejected, not attempted
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["skipped"] == 0
+    assert result["failed"] == 0
+    # The attempted domain is the real agency, not reddit
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "real-ai-agency.example" in messages
+    # No progress line for reddit
+    assert "Processing agency 1/1: reddit.com" not in messages
+    assert "Processing agency 1/1: real-ai-agency.example" in messages
+    # DEBUG rejection log for reddit
+    assert any("reddit.com" in r.getMessage() and "blocked-domain" in r.getMessage() for r in caplog.records)
+    # Discovery stats
+    assert result["raw_candidate_domains"] == 2
+    assert result["rejected_candidate_domains"] == 1
+    assert result["candidate_domains"] == 1
+
+
+def test_all_results_rejected_returns_zero_candidate_batch(tmp_path, monkeypatch):
+    """If Serper works but every result is rejected by candidate filtering,
+    return a valid zero-candidate batch (NOT a search failure)."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(title="Reddit thread", url="https://www.reddit.com/r/ai", snippet="", query="q"),
+        SearchHit(title="Quora answer", url="https://www.quora.com/ai", snippet="", query="q"),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+
+    result = run_pipeline(limit=1)
+
+    # Not a failure -- just no eligible candidates
+    assert result["raw_candidate_domains"] == 2
+    assert result["rejected_candidate_domains"] == 2
+    assert result["candidate_domains"] == 0
+    assert result["attempted"] == 0
+    assert result["processed"] == 0
+    assert result["failed"] == 0
+    assert result["skipped"] == 0
+
+
+def test_discovery_stats_in_summary(tmp_path, monkeypatch):
+    """The final summary must include raw_candidate_domains and
+    rejected_candidate_domains alongside candidate_domains."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(title="Reddit", url="https://www.reddit.com/r/ai", snippet="", query="q"),
+        SearchHit(
+            title="Acme AI - AI Development Agency",
+            url="https://acme-ai.com/",
+            snippet="We build AI agents and automation.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "crawl_company",
+        lambda url: _make_site(STRONG_TEXT, "acme-ai.com"),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert "raw_candidate_domains" in result
+    assert "rejected_candidate_domains" in result
+    assert "candidate_domains" in result
+    assert result["raw_candidate_domains"] == 2
+    assert result["rejected_candidate_domains"] == 1
+    assert result["candidate_domains"] == 1
+
+
+def test_dedup_by_normalized_domain(tmp_path, monkeypatch):
+    """Multiple results from the same domain must collapse to one candidate."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(title="Agency Blog", url="https://www.agency.ai/blog/agents", snippet="AI agency blog", query="q"),
+        SearchHit(title="Agency Services", url="https://agency.ai/services", snippet="AI development services", query="q"),
+        SearchHit(title="Agency About", url="https://agency.ai/about", snippet="About our AI consultancy", query="q"),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "crawl_company",
+        lambda url: _make_site(STRONG_TEXT, "agency.ai"),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=1)
+
+    # Three URLs from the same domain -> one candidate
+    assert result["raw_candidate_domains"] == 1
+    assert result["candidate_domains"] == 1
+    assert result["attempted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# R1-1: Same-domain rejection must not poison later acceptable hits.
+# ---------------------------------------------------------------------------
+
+
+def test_same_domain_rejected_then_accepted(tmp_path, monkeypatch):
+    """R1-7 test A: A rejected first URL must not permanently reject the
+    domain if a later hit from the same domain is acceptable."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(
+            title="Top 10 AI Agencies",
+            url="https://realagency.com/top-10-ai-agencies",
+            snippet="A list of the best AI agencies.",
+            query="q",
+        ),
+        SearchHit(
+            title="Generative AI Development Services",
+            url="https://realagency.com/services/generative-ai",
+            snippet="We build AI agents and LLM applications for clients.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "crawl_company",
+        lambda url: _make_site(STRONG_TEXT, "realagency.com"),
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=1)
+
+    # The domain was observed once, the listicle was rejected, but the services
+    # page was accepted.  So the domain is NOT counted as rejected.
+    assert result["raw_candidate_domains"] == 1
+    assert result["rejected_candidate_domains"] == 0
+    assert result["candidate_domains"] == 1
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+
+
+def test_same_domain_two_rejected(tmp_path, monkeypatch):
+    """R1-7 test B: Two rejected URLs from the same domain → raw=1,
+    rejected=1, eligible=0."""
+    _set_db(tmp_path)
+    from app.search import SearchHit
+
+    hits = [
+        SearchHit(
+            title="Top 10 AI Agencies",
+            url="https://realagency.com/top-10-ai-agencies",
+            snippet="A list of the best AI agencies.",
+            query="q",
+        ),
+        SearchHit(
+            title="Discussion: AI Tools",
+            url="https://realagency.com/thread/123",
+            snippet="Join the community discussion about AI tools.",
+            query="q",
+        ),
+    ]
+
+    def fake_search(query, num=10):
+        return hits
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+
+    result = run_pipeline(limit=1)
+
+    assert result["raw_candidate_domains"] == 1
+    assert result["rejected_candidate_domains"] == 1
+    assert result["candidate_domains"] == 0
+    assert result["attempted"] == 0
