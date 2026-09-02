@@ -36,11 +36,15 @@ def _make_site(text: str, domain: str, title: str = "Example") -> dict:
 
 
 STRONG_TEXT = (
-    "Generative AI development agency. We build AI agents, workflow automation, "
-    "custom software, RAG systems, APIs and backend products. See our client case studies. "
+    "We are an AI development agency providing custom software and AI development services "
+    "for clients. We build AI agents, workflow automation, RAG systems, APIs and backend products. "
+    "See our case studies and client projects. Our delivery team helps companies with "
+    "AI implementation and system integration. We are a technology partner and development partner "
+    "offering engineering services and implementation services. "
     "We deliver production AI systems for clients across multiple industries. "
     "Our team specializes in LLM development, retrieval augmented generation, "
-    "and end-to-end AI product engineering. Contact us at hello@example.ai"
+    "machine learning, data engineering, and end-to-end AI product engineering. "
+    "Contact us at hello@example.ai"
 )
 
 
@@ -963,3 +967,136 @@ def test_same_domain_two_rejected(tmp_path, monkeypatch):
     assert result["rejected_candidate_domains"] == 1
     assert result["candidate_domains"] == 0
     assert result["attempted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Commercial fit: LLM must NOT be called for below-threshold candidates.
+# ---------------------------------------------------------------------------
+
+WEAK_TEXT = (
+    "AI agent platform for building conversational AI. Start free today. "
+    "Pricing plans for every team. Our SaaS platform offers self-service "
+    "deployment. Subscribe to our developer platform today. API documentation and "
+    "developer tools available. Product documentation and SDK access. "
+    "Sign up free and start building your first AI agent in minutes. "
+    "Our self-service platform makes it easy to deploy AI solutions."
+)
+
+
+def test_below_threshold_skips_llm_analysis_and_outreach(tmp_path, monkeypatch):
+    """A below-threshold candidate must NOT invoke analyze_agency or
+    draft_outreach.  The pipeline should persist lightweight lead data and
+    count it as processed + below_score."""
+    _set_db(tmp_path)
+    _setup_search(["saas-platform.com"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "saas-platform.com")
+    )
+
+    # If analyze_agency is called, raise to make the test fail loudly.
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("analyze_agency should NOT be called for below-threshold candidate")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", fail_if_called)
+
+    def fail_draft_if_called(*args, **kwargs):
+        raise AssertionError("draft_outreach should NOT be called for below-threshold candidate")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fail_draft_if_called)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 1
+    assert result["qualified"] == 0
+    assert result["drafted"] == 0
+    assert result["failed"] == 0
+    # LLM counters
+    assert result["llm_analysis_calls"] == 0
+    assert result["llm_skipped_below_threshold"] == 1
+    assert result["outreach_drafts_generated"] == 0
+    # Invariant
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+
+
+def test_qualified_lead_calls_llm_and_generates_draft(tmp_path, monkeypatch):
+    """A qualified candidate must invoke analyze_agency and draft_outreach."""
+    _set_db(tmp_path)
+    _setup_search(["good-agency.com"], monkeypatch)
+
+    analysis_called = {"n": 0}
+    draft_called = {"n": 0}
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "good-agency.com")
+    )
+
+    def track_analysis(company, website, text):
+        analysis_called["n"] += 1
+        return {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        }
+
+    def track_draft(company, fit, proof, angle):
+        draft_called["n"] += 1
+        return ("Subject", "Body")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", track_analysis)
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", track_draft)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["qualified"] == 1
+    assert result["drafted"] == 1
+    assert result["below_score"] == 0
+    assert analysis_called["n"] == 1
+    assert draft_called["n"] == 1
+    assert result["llm_analysis_calls"] == 1
+    assert result["llm_skipped_below_threshold"] == 0
+    assert result["outreach_drafts_generated"] == 1
+
+
+def test_llm_counters_in_summary(tmp_path, monkeypatch):
+    """The summary must include LLM call counters."""
+    _set_db(tmp_path)
+    _setup_search(["good.com", "bad.com"], monkeypatch)
+
+    def fake_crawl(url):
+        if "bad.com" in url:
+            return _make_site(WEAK_TEXT, "bad.com")
+        return _make_site(STRONG_TEXT, "good.com")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fake_crawl)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=2)
+
+    assert "llm_analysis_calls" in result
+    assert "llm_skipped_below_threshold" in result
+    assert "outreach_drafts_generated" in result
+    assert result["llm_analysis_calls"] == 1
+    assert result["llm_skipped_below_threshold"] == 1
+    assert result["outreach_drafts_generated"] == 1

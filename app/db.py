@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS leads (
     contact_role TEXT,
     contact_email TEXT,
     contact_source TEXT,
+    contact_quality TEXT,
     subject TEXT,
     draft TEXT,
     status TEXT NOT NULL DEFAULT 'discovered',
@@ -41,6 +42,20 @@ CREATE TABLE IF NOT EXISTS leads (
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status_score ON leads(status, score DESC);
 """
+
+# Columns to add if they don't exist (backward-compatible migration).
+_MIGRATION_COLUMNS = [
+    ("contact_quality", "TEXT"),
+]
+
+
+def _migrate(db: sqlite3.Connection) -> None:
+    """Add columns that may be missing in older database files."""
+    cols = {row["name"] for row in db.execute("PRAGMA table_info(leads)").fetchall()}
+    for col_name, col_type in _MIGRATION_COLUMNS:
+        if col_name not in cols:
+            db.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_type}")
+            logger.debug("Added column %s to leads table", col_name)
 
 
 def now_iso() -> str:
@@ -62,6 +77,7 @@ def init_db() -> None:
     logger.debug("Initializing database at %s", settings.db_path)
     with conn() as db:
         db.executescript(SCHEMA)
+        _migrate(db)
 
 
 def upsert_lead(data: dict) -> int:
