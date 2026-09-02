@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,10 +13,36 @@ from .config import settings
 from .db import due_followups, get_lead, init_db, list_leads, now_iso, update_lead
 from .gmail_client import create_draft
 from .llm import draft_followup
+from .logging_config import configure_logging, get_logger
 from .pipeline import run as run_pipeline
 
 app = typer.Typer(help="Human-approved agency outreach pipeline")
 console = Console()
+logger = get_logger("cli")
+
+
+@app.callback()
+def main_callback(
+    ctx: typer.Context,
+) -> None:
+    """Configure logging before any subcommand runs."""
+    configure_logging()
+
+
+def _startup_banner(effective_limit: int, effective_log_level: str) -> None:
+    openai_enabled = "enabled" if settings.openai_api_key else "disabled (deterministic fallback)"
+    serper_configured = "configured" if settings.serper_api_key else "MISSING"
+    lines = [
+        "Agency Outreach",
+        "---------------",
+        f"Limit:            {effective_limit}",
+        f"Minimum score:    {settings.min_score}",
+        f"OpenAI:           {openai_enabled}",
+        f"Serper:           {serper_configured}",
+        f"Database:         {settings.db_path}",
+        f"Log level:        {effective_log_level}",
+    ]
+    print("\n".join(lines))
 
 
 def print_leads(rows) -> None:
@@ -34,8 +61,20 @@ def init_db_cmd():
 
 
 @app.command("run")
-def run_cmd(limit: int = typer.Option(None, help="Max agency sites to process")):
-    result = run_pipeline(limit)
+def run_cmd(
+    limit: int = typer.Option(None, help="Max agency sites to process"),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable DEBUG logging for this run"),
+):
+    effective_log_level = "DEBUG" if verbose else settings.log_level
+    if verbose:
+        configure_logging(level=logging.DEBUG)
+    if not settings.serper_api_key:
+        raise typer.BadParameter(
+            "SERPER_API_KEY is missing. Add it to .env before running the pipeline."
+        )
+    effective_limit = limit or settings.discovery_limit
+    _startup_banner(effective_limit, effective_log_level)
+    result = run_pipeline(effective_limit)
     console.print(result)
 
 

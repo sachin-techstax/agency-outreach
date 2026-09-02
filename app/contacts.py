@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import re
 
+from .logging_config import get_logger
+
+logger = get_logger("contacts")
+
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 ROLE_WORDS = ["founder", "co-founder", "ceo", "cto", "head of engineering", "technical director", "head of delivery", "coo"]
 
@@ -25,6 +29,10 @@ def discover_contact(text: str, pages: list[tuple[str, str]], domain: str) -> di
 
     lowered = text.lower()
     role = next((r.title() for r in ROLE_WORDS if r in lowered), "Founder / CTO")
+    if preferred:
+        logger.info("Selected public contact %s", preferred[0])
+    else:
+        logger.info("No public company-domain email found for %s", domain)
     return {
         "contact_email": preferred[0] if preferred else "",
         "contact_source": preferred[1] if preferred else "",

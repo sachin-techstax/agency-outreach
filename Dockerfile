@@ -15,6 +15,7 @@ RUN python -m pip install --upgrade pip \
 
 COPY app ./app
 COPY tests ./tests
+COPY conftest.py ./conftest.py
 
 RUN chown -R app:app /workspace
 

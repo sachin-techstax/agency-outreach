@@ -6,6 +6,9 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from .config import settings
+from .logging_config import get_logger
+
+logger = get_logger("db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -56,6 +59,7 @@ def conn():
 
 
 def init_db() -> None:
+    logger.debug("Initializing database at %s", settings.db_path)
     with conn() as db:
         db.executescript(SCHEMA)
 
@@ -70,12 +74,25 @@ def upsert_lead(data: dict) -> int:
             sets = ", ".join(f"{k}=?" for k in allowed)
             values = [data[k] for k in allowed] + [stamp, existing["id"]]
             db.execute(f"UPDATE leads SET {sets}, updated_at=? WHERE id=?", values)
+            logger.debug(
+                "Updated lead id=%s domain=%s fields=%s",
+                existing["id"],
+                data["domain"],
+                ",".join(allowed),
+            )
             return int(existing["id"])
         cols = list(data.keys()) + ["created_at", "updated_at"]
         vals = [data[c] for c in data] + [stamp, stamp]
         q = ",".join("?" for _ in cols)
         cur = db.execute(f"INSERT INTO leads ({','.join(cols)}) VALUES ({q})", vals)
-        return int(cur.lastrowid)
+        lead_id = int(cur.lastrowid)
+        logger.debug(
+            "Inserted lead id=%s domain=%s fields=%s",
+            lead_id,
+            data["domain"],
+            ",".join(data.keys()),
+        )
+        return lead_id
 
 
 def update_lead(lead_id: int, **updates) -> None:
@@ -86,6 +103,23 @@ def update_lead(lead_id: int, **updates) -> None:
     values = [updates[c] for c in cols] + [lead_id]
     with conn() as db:
         db.execute(f"UPDATE leads SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?", values)
+    # Log only field names and status (when applicable). Never stringify
+    # arbitrary values such as draft bodies, email content, or tokens.
+    changed = [c for c in cols if c != "updated_at"]
+    status = updates.get("status")
+    if status is not None:
+        logger.debug(
+            "Updated lead id=%s fields=%s status=%s",
+            lead_id,
+            ",".join(changed),
+            status,
+        )
+    else:
+        logger.debug(
+            "Updated lead id=%s fields=%s",
+            lead_id,
+            ",".join(changed),
+        )
 
 
 def get_lead(lead_id: int):

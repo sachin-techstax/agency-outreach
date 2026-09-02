@@ -95,6 +95,98 @@ Or:
 make run LIMIT=15
 ```
 
+The pipeline prints a startup banner and live stage-by-stage progress so you can see exactly what it is doing:
+
+```text
+Agency Outreach
+---------------
+Limit:            15
+Minimum score:    70
+OpenAI:           enabled
+Serper:           configured
+Database:         /data/agency_outreach.db
+Log level:        INFO
+
+2026-09-02 21:58:11 | INFO  | pipeline | Starting agency discovery. Target: 15
+2026-09-02 21:58:11 | INFO  | search   | Query: "AI automation" agency
+2026-09-02 21:58:12 | INFO  | search   | 10 results returned in 0.72s
+2026-09-02 21:58:12 | INFO  | pipeline | Discovered 32 unique candidate domains
+2026-09-02 21:58:12 | INFO  | pipeline | Processing agency 1/15: example.ai
+2026-09-02 21:58:12 | INFO  | scrape   | Fetching homepage: https://example.ai
+2026-09-02 21:58:14 | INFO  | scrape   | Crawled 4 pages, 18342 characters for example.ai
+2026-09-02 21:58:14 | INFO  | scrape   | Crawled example.ai in 2.1s
+2026-09-02 21:58:14 | INFO  | pipeline | example.ai score: 85
+2026-09-02 21:58:14 | INFO  | contacts | Selected public contact hello@example.ai
+2026-09-02 21:58:14 | INFO  | llm      | Analyzing agency Example with model gpt-5.6-luna
+2026-09-02 21:58:16 | INFO  | llm      | Selected proof project: WingerX
+2026-09-02 21:58:16 | INFO  | llm      | Agency analysis completed in 2.1s
+2026-09-02 21:58:16 | INFO  | llm      | Generating outreach draft for Example
+2026-09-02 21:58:17 | INFO  | llm      | Outreach draft generated in 1.0s
+2026-09-02 21:58:17 | INFO  | pipeline | Draft created for example.ai
+2026-09-02 21:58:17 | INFO  | pipeline | Finished example.ai in 5.2s
+...
+2026-09-02 21:59:42 | INFO  | pipeline | Batch complete: processed=15 drafted=8 skipped=5 failed=2
+
+Batch complete
+--------------
+Candidates discovered: 41
+Processed:             15
+Qualified:             9
+Drafted:               8
+Below threshold:       4
+No contact found:      3
+Skipped:               2
+Failed:                1
+Duration:              94.3s
+
+Failures:
+- anotheragency.com: ConnectTimeout
+- broken-ai.dev: HTTP 403
+```
+
+If `SERPER_API_KEY` is missing, the `run` command fails immediately with a clear message instead of entering the pipeline.
+
+### Debug mode
+
+To see DEBUG-level detail (every page fetched, HTTP status codes, response lengths, JSON recovery, DB inserts/updates) for a single run without editing `.env`:
+
+```bash
+docker compose run --rm outreach run --limit 1 --verbose
+```
+
+Alternatively, set `LOG_LEVEL=DEBUG` in `.env` or pass it explicitly to the container:
+
+```bash
+docker compose run --rm -e LOG_LEVEL=DEBUG outreach run --limit 1
+```
+
+### File logging
+
+Set `LOG_FILE` in `.env` to mirror logs to a rotating file (5 MB per file, 3 backups):
+
+```env
+LOG_FILE=/data/agency-outreach.log
+```
+
+When enabled inside Docker, the log file persists on the host at:
+
+```text
+./data/agency-outreach.log
+```
+
+If `LOG_FILE` is blank, only console output is produced.
+
+### Log levels
+
+| Level    | Usage                                                        |
+|----------|--------------------------------------------------------------|
+| DEBUG    | Per-page fetches, HTTP statuses, response lengths, DB writes |
+| INFO     | Stage progress, scores, contacts, durations, batch summary   |
+| WARNING  | Timeouts, HTTP 403/429, empty content, recoverable skips     |
+| ERROR    | Failed agencies, API failures, with traceback                |
+
+Logs never print API keys, OAuth tokens, or full scraped website text.
+
 ## 5. Review leads
 
 ```bash
