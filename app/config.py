@@ -30,6 +30,8 @@ class Settings:
     db_path: Path = Path(os.getenv("DB_PATH", "agency_outreach.db"))
     gmail_client_secret: Path = Path(os.getenv("GMAIL_CLIENT_SECRET", "client_secret.json"))
     gmail_token_file: Path = Path(os.getenv("GMAIL_TOKEN_FILE", "token.json"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
+    log_file: str = os.getenv("LOG_FILE", "").strip()
 
 
 settings = Settings()
