@@ -71,13 +71,16 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
     file_path = log_file if log_file is not None else os.getenv("LOG_FILE", "").strip()
 
     root = logging.getLogger()
-    # Remove previous handlers so re-configuration (e.g. --verbose) is clean.
+    # Remove previous handlers that we installed so re-configuration (e.g.
+    # --verbose) is clean. We deliberately leave foreign handlers (such as
+    # pytest's LogCaptureHandler) in place so test fixtures keep working.
     for h in list(root.handlers):
-        root.removeHandler(h)
-        try:
-            h.close()
-        except Exception:
-            pass
+        if getattr(h, "_agency_outreach_owned", False):
+            root.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
 
     root.setLevel(logging.DEBUG)  # handlers filter; root lets everything through
     formatter = logging.Formatter(_FORMAT, datefmt=_DATEFMT)
@@ -85,6 +88,7 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
     console = logging.StreamHandler()
     console.setLevel(level_int)
     console.setFormatter(formatter)
+    console._agency_outreach_owned = True  # type: ignore[attr-defined]
     root.addHandler(console)
 
     if file_path:
@@ -94,12 +98,22 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
             file_handler = RotatingFileHandler(
                 str(path), maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
             )
-            file_handler.setLevel(logging.DEBUG)  # file captures everything available
+            # File handler respects the configured LOG_LEVEL (R1-6). A separate
+            # file-specific level can be added in the future if needed.
+            file_handler.setLevel(level_int)
             file_handler.setFormatter(formatter)
+            file_handler._agency_outreach_owned = True  # type: ignore[attr-defined]
             root.addHandler(file_handler)
-        except Exception:
-            # File logging is optional; never let it break the run.
-            root.addHandler(logging.NullHandler())
+        except Exception as exc:
+            # File logging is optional; keep console logging active and emit a
+            # WARNING so the operator knows file logging is unavailable. Do not
+            # expose sensitive configuration beyond the requested path.
+            logging.getLogger("logging_config").warning(
+                "File logging could not be initialized for path %r: %s. "
+                "Continuing with console logging only.",
+                file_path,
+                exc,
+            )
 
     # Quiet noisy third-party loggers that are not part of our managed set.
     for noisy in ("httpx", "httpcore", "openai", "urllib3", "googleapiclient", "google_auth_httplib2"):

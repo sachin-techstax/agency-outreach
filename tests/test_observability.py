@@ -16,14 +16,14 @@ from app.config import settings
 def test_configure_logging_sets_level():
     configure_logging(level="DEBUG")
     root = logging.getLogger()
-    console_handler = next(h for h in root.handlers if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
+    console_handler = next(h for h in root.handlers if getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
     assert console_handler.level == logging.DEBUG
 
 
 def test_configure_logging_default_info():
     configure_logging(level="INFO")
     root = logging.getLogger()
-    console_handler = next(h for h in root.handlers if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
+    console_handler = next(h for h in root.handlers if getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
     assert console_handler.level == logging.INFO
 
 
@@ -85,3 +85,36 @@ def test_search_does_not_log_api_key(caplog):
 
     full_text = " ".join(r.getMessage() for r in caplog.records)
     assert secret not in full_text
+
+
+# ---------------------------------------------------------------------------
+# R1-6: RotatingFileHandler must respect the configured LOG_LEVEL.
+# ---------------------------------------------------------------------------
+
+
+def test_file_handler_respects_log_level(tmp_path):
+    from logging.handlers import RotatingFileHandler
+
+    from app.logging_config import configure_logging
+
+    log_file = tmp_path / "app.log"
+    configure_logging(level="INFO", log_file=str(log_file))
+
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+    assert len(file_handlers) == 1
+    assert file_handlers[0].level == logging.INFO
+
+
+def test_file_handler_respects_debug_level(tmp_path):
+    from logging.handlers import RotatingFileHandler
+
+    from app.logging_config import configure_logging
+
+    log_file = tmp_path / "app_debug.log"
+    configure_logging(level="DEBUG", log_file=str(log_file))
+
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, RotatingFileHandler)]
+    assert len(file_handlers) == 1
+    assert file_handlers[0].level == logging.DEBUG

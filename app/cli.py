@@ -29,13 +29,13 @@ def main_callback(
     configure_logging()
 
 
-def _startup_banner() -> None:
+def _startup_banner(effective_limit: int) -> None:
     openai_enabled = "enabled" if settings.openai_api_key else "disabled (deterministic fallback)"
     serper_configured = "configured" if settings.serper_api_key else "MISSING"
     lines = [
         "Agency Outreach",
         "---------------",
-        f"Limit:            {settings.discovery_limit}",
+        f"Limit:            {effective_limit}",
         f"Minimum score:    {settings.min_score}",
         f"OpenAI:           {openai_enabled}",
         f"Serper:           {serper_configured}",
@@ -71,8 +71,9 @@ def run_cmd(
         raise typer.BadParameter(
             "SERPER_API_KEY is missing. Add it to .env before running the pipeline."
         )
-    _startup_banner()
-    result = run_pipeline(limit)
+    effective_limit = limit or settings.discovery_limit
+    _startup_banner(effective_limit)
+    result = run_pipeline(effective_limit)
     console.print(result)
 
 

@@ -46,13 +46,26 @@ def _classify_failure(exc: Exception) -> str:
 
 
 def _discover_candidates(target: int) -> dict:
+    """Run discovery searches and return unique candidate domains.
+
+    Raises ``RuntimeError`` if every configured search query fails, so the
+    caller does not proceed with an apparently successful empty batch.
+    A successful search that returns zero organic results is not treated as
+    a failure.
+    """
     candidates: dict[str, object] = {}
+    search_attempts = 0
+    search_success = 0
+    search_failed = 0
     for query in DEFAULT_QUERIES:
+        search_attempts += 1
         try:
             hits = search_serper(query, num=10)
         except Exception as exc:
+            search_failed += 1
             logger.error("Search failed for query %r: %s", query, exc)
             continue
+        search_success += 1
         for hit in hits:
             domain = domain_of(hit.url)
             host = urlparse(hit.url).netloc.lower()
@@ -64,6 +77,16 @@ def _discover_candidates(target: int) -> dict:
                 break
         if len(candidates) >= target * 3:
             break
+    logger.info(
+        "Discovery searches: attempted=%d success=%d failed=%d",
+        search_attempts,
+        search_success,
+        search_failed,
+    )
+    if search_success == 0 and search_attempts > 0:
+        raise RuntimeError(
+            f"Agency discovery failed: all {search_attempts} Serper searches failed."
+        )
     logger.info("Discovered %d unique candidate domains", len(candidates))
     return candidates
 
@@ -75,6 +98,7 @@ def run(limit: int | None = None) -> dict:
 
     candidates = _discover_candidates(target)
 
+    attempted = 0
     processed = 0
     drafted = 0
     qualified = 0
@@ -85,10 +109,10 @@ def run(limit: int | None = None) -> dict:
     failures: list[tuple[str, str]] = []
 
     for domain, hit in candidates.items():
-        if processed >= target:
+        if attempted >= target:
             break
-        index = processed + skipped + failed + 1
-        logger.info("Processing agency %d/%d: %s", index, target, domain)
+        attempted += 1
+        logger.info("Processing agency %d/%d: %s", attempted, target, domain)
         site_start = time.perf_counter()
         try:
             site = crawl_company(hit.url)
@@ -150,6 +174,7 @@ def run(limit: int | None = None) -> dict:
 
     batch_elapsed = time.perf_counter() - batch_start
     summary = {
+        "attempted": attempted,
         "processed": processed,
         "drafted": drafted,
         "candidate_domains": len(candidates),
@@ -167,7 +192,8 @@ def run(limit: int | None = None) -> dict:
 
 def _log_summary(summary: dict) -> None:
     logger.info(
-        "Batch complete: processed=%d drafted=%d skipped=%d failed=%d",
+        "Batch complete: attempted=%d processed=%d drafted=%d skipped=%d failed=%d",
+        summary["attempted"],
         summary["processed"],
         summary["drafted"],
         summary["skipped"],
@@ -177,14 +203,15 @@ def _log_summary(summary: dict) -> None:
         "Batch complete",
         "--------------",
         f"Candidates discovered: {summary['candidate_domains']}",
-        f"Processed:             {summary['processed']}",
-        f"Qualified:             {summary['qualified']}",
-        f"Drafted:               {summary['drafted']}",
-        f"Below threshold:       {summary['below_score']}",
-        f"No contact found:      {summary['no_contact']}",
-        f"Skipped:               {summary['skipped']}",
-        f"Failed:                {summary['failed']}",
-        f"Duration:              {summary['duration_s']}s",
+        f"Attempted:            {summary['attempted']}",
+        f"Processed:            {summary['processed']}",
+        f"Qualified:            {summary['qualified']}",
+        f"Drafted:              {summary['drafted']}",
+        f"Below threshold:      {summary['below_score']}",
+        f"No contact found:     {summary['no_contact']}",
+        f"Skipped:              {summary['skipped']}",
+        f"Failed:               {summary['failed']}",
+        f"Duration:             {summary['duration_s']}s",
     ]
     if summary["failures"]:
         lines.append("")
