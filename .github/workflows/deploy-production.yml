@@ -1,0 +1,88 @@
+name: Deploy production
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agency-outreach-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify deployable revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare CI-only environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          sed -i 's/^SERPER_API_KEY=.*/SERPER_API_KEY=ci-not-used/' .env
+          sed -i 's/^OPENAI_API_KEY=.*/OPENAI_API_KEY=ci-not-used/' .env
+          sed -i 's|^PORTFOLIO_URL=.*|PORTFOLIO_URL=https://example.invalid/portfolio|' .env
+          mkdir -p data secrets
+
+      - name: Build Docker image
+        run: docker compose build
+
+      - name: Run full test suite
+        run: docker compose run --rm -T --entrypoint pytest outreach -q
+
+      - name: Smoke-test CLI
+        run: docker compose run --rm -T outreach --help
+
+  deploy:
+    name: Deploy exact SHA to Hetzner
+    if: github.ref == 'refs/heads/master'
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+      HETZNER_USER: ${{ secrets.HETZNER_USER }}
+      HETZNER_SSH_KEY: ${{ secrets.HETZNER_SSH_KEY }}
+      HETZNER_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
+      DEPLOY_SHA: ${{ github.sha }}
+
+    steps:
+      - name: Checkout deployment script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in HETZNER_HOST HETZNER_USER HETZNER_SSH_KEY HETZNER_KNOWN_HOSTS; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Required GitHub secret ${name} is not configured."
+              exit 1
+            fi
+          done
+
+      - name: Configure pinned SSH identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${HOME}/.ssh"
+          umask 077
+          printf '%s\n' "${HETZNER_SSH_KEY}" > "${HOME}/.ssh/deploy_key"
+          printf '%s\n' "${HETZNER_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 600 "${HOME}/.ssh/deploy_key" "${HOME}/.ssh/known_hosts"
+
+      - name: Deploy exact triggering SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh             -i "${HOME}/.ssh/deploy_key"             -o BatchMode=yes             -o IdentitiesOnly=yes             -o StrictHostKeyChecking=yes             -o UserKnownHostsFile="${HOME}/.ssh/known_hosts"             "${HETZNER_USER}@${HETZNER_HOST}"             bash -s -- "${DEPLOY_SHA}"             < scripts/deploy-production.sh
