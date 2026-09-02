@@ -169,6 +169,12 @@ _AGENCY_RE = re.compile(
     r"\b(agency|consultancy|consulting firm|consulting practice)\b",
     re.I,
 )
+_TRAINING_RE = re.compile(
+    r"\b(online course|course platform|cohort-based|bootcamp program|"
+    r"certification program|training program for|enroll in course|"
+    r"course curriculum|academy)\b",
+    re.I,
+)
 
 
 @dataclass
@@ -204,10 +210,16 @@ def _determine_category(text_lower: str, commercial_hits: list, product_hits: li
     has_community = bool(_COMMUNITY_RE.search(text_lower))
     has_marketplace = bool(_MARKETPLACE_RE.search(text_lower))
     has_enterprise = bool(_ENTERPRISE_RE.search(text_lower))
+    has_training = bool(_TRAINING_RE.search(text_lower))
 
-    # Community/training takes priority for categorization
+    # Community takes priority for categorization (membership/community platform)
     if has_community and not has_agency:
         return "community"
+    # Training/education platform (courses, bootcamps, academies) — but only
+    # when there is no stronger agency identity.  A real agency that offers
+    # employee training or workshops should not be classified as training.
+    if has_training and not has_agency and not commercial_hits:
+        return "training"
     if has_marketplace and not has_agency:
         return "marketplace"
 

@@ -10,6 +10,53 @@ from .logging_config import get_logger
 
 logger = get_logger("db")
 
+# ---------------------------------------------------------------------------
+# Workflow state protection
+# ---------------------------------------------------------------------------
+# Once a lead reaches a human-confirmed or sent state, automated discovery
+# runs must NOT overwrite its workflow status, outreach draft, Gmail draft ID,
+# or follow-up/contact history.  These represent human decisions that the
+# pipeline is not allowed to undo.
+PROTECTED_STATUSES = frozenset({
+    "approved",
+    "gmail_drafted",
+    "sent",
+})
+
+# Fields that must never be overwritten by an automated upsert when the
+# existing lead is in a protected status.
+_PROTECTED_FIELDS = frozenset({
+    "status",
+    "subject",
+    "draft",
+    "gmail_draft_id",
+    "last_contact_at",
+    "followup_due_at",
+})
+
+# Fields that represent generated/contact state and should be cleared when a
+# non-protected lead is downgraded to rejected-fit (the generated content no
+# longer applies).
+_STALE_GENERATED_FIELDS = frozenset({
+    "subject",
+    "draft",
+    "gmail_draft_id",
+    "contact_email",
+    "contact_source",
+    "contact_name",
+    "contact_role",
+    "contact_quality",
+})
+
+
+def is_workflow_state_protected(status: str | None) -> bool:
+    """Return True if *status* is a protected workflow state.
+
+    Protected states (approved, gmail_drafted, sent) represent human decisions
+    that automated discovery must not overwrite.
+    """
+    return status in PROTECTED_STATUSES
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,11 +128,53 @@ def init_db() -> None:
 
 
 def upsert_lead(data: dict) -> int:
+    """Insert or update a lead, respecting workflow-state protection.
+
+    If an existing lead is in a protected status (approved, gmail_drafted,
+    sent), the following fields are never overwritten:
+    - status, subject, draft, gmail_draft_id, last_contact_at, followup_due_at
+
+    Research metadata (score, score_reasons, summary, etc.) may still be
+    refreshed so that human reviewers see the latest qualification data.
+
+    If a non-protected lead is being downgraded to ``rejected-fit``, stale
+    generated/contact state (subject, draft, gmail_draft_id, contact_*) is
+    cleared so the row does not retain an old outreach draft from a prior
+    qualification.
+    """
     init_db()
     stamp = now_iso()
     with conn() as db:
-        existing = db.execute("SELECT id FROM leads WHERE domain=?", (data["domain"],)).fetchone()
+        existing = db.execute(
+            "SELECT * FROM leads WHERE domain=?", (data["domain"],)
+        ).fetchone()
         if existing:
+            existing_status = existing["status"]
+            new_status = data.get("status", existing_status)
+
+            if is_workflow_state_protected(existing_status):
+                # Remove protected fields from the update payload so they
+                # are never overwritten by automated discovery.
+                data = {
+                    k: v for k, v in data.items()
+                    if k not in _PROTECTED_FIELDS
+                }
+                logger.debug(
+                    "Preserving protected workflow state for lead id=%s "
+                    "domain=%s status=%s",
+                    existing["id"], data["domain"], existing_status,
+                )
+            elif new_status == "rejected-fit":
+                # Non-protected lead being downgraded: clear stale generated
+                # state so the row doesn't retain an old draft/Gmail ID.
+                for field in _STALE_GENERATED_FIELDS:
+                    if field not in data:
+                        data[field] = ""
+                    # If the field IS in data (e.g. contact_email from
+                    # discover_contact), it will be set to whatever value was
+                    # passed.  For rejected-fit, the pipeline passes empty
+                    # strings for all contact fields, so this is consistent.
+
             allowed = [k for k in data if k not in {"id", "created_at"}]
             sets = ", ".join(f"{k}=?" for k in allowed)
             values = [data[k] for k in allowed] + [stamp, existing["id"]]
@@ -112,8 +201,32 @@ def upsert_lead(data: dict) -> int:
 
 
 def update_lead(lead_id: int, **updates) -> None:
+    """Update specific fields on a lead, respecting workflow-state protection.
+
+    If the lead is in a protected status, protected fields (status, subject,
+    draft, gmail_draft_id, last_contact_at, followup_due_at) are silently
+    dropped from the update.
+    """
     if not updates:
         return
+    init_db()
+    # Check if the lead is in a protected state
+    with conn() as db:
+        row = db.execute("SELECT status FROM leads WHERE id=?", (lead_id,)).fetchone()
+    if row and is_workflow_state_protected(row["status"]):
+        protected_updates = {
+            k: v for k, v in updates.items() if k in _PROTECTED_FIELDS
+        }
+        if protected_updates:
+            logger.debug(
+                "Dropping protected field updates for lead id=%s status=%s: %s",
+                lead_id, row["status"], ",".join(protected_updates.keys()),
+            )
+        updates = {
+            k: v for k, v in updates.items() if k not in _PROTECTED_FIELDS
+        }
+        if not updates:
+            return  # Nothing left to update
     updates["updated_at"] = now_iso()
     cols = list(updates)
     values = [updates[c] for c in cols] + [lead_id]

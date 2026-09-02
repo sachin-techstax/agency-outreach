@@ -9,10 +9,9 @@ from .commercial_fit import score_commercial_fit
 from .company_identity import extract_company_name
 from .config import settings
 from .contacts import discover_contact
-from .db import upsert_lead, update_lead
+from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead
 from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
-from .scoring import score_agency
 from .scrape import crawl_company, domain_of, root_url
 from .search import DEFAULT_QUERIES, search_serper
 
@@ -135,10 +134,11 @@ def run(limit: int | None = None) -> dict:
     below_score = 0
     failures: list[tuple[str, str]] = []
 
-    # LLM cost counters
-    llm_analysis_calls = 0
-    llm_skipped_below_threshold = 0
-    outreach_drafts_generated = 0
+    # LLM cost counters (attempted = API call invoked, even if it raises)
+    llm_analysis_calls = 0          # analyze_agency invocations attempted
+    llm_skipped_below_threshold = 0 # candidates that skipped LLM entirely
+    outreach_draft_calls = 0        # draft_outreach invocations attempted
+    outreach_drafts_generated = 0   # draft_outreach calls that succeeded
 
     for domain, hit in candidates.items():
         if attempted >= target:
@@ -153,23 +153,22 @@ def run(limit: int | None = None) -> dict:
                 skipped += 1
                 continue
 
-            # --- deterministic commercial-fit qualification ---
+            # --- deterministic commercial-fit qualification (single source of truth) ---
             company = extract_company_name(site["title"] or hit.title, domain)
             fit = score_commercial_fit(site["text"])
-            s = score_agency(site["text"])
             qual_logger.info(
                 "%s commercial category=%s score=%d",
                 domain, fit.category, fit.score,
             )
-            logger.info("%s score: %d category: %s", domain, s.value, fit.category)
+            logger.info("%s score: %d category: %s", domain, fit.score, fit.category)
 
             # --- below threshold: persist lightweight lead, skip LLM ---
-            if s.value < settings.min_score:
+            if fit.score < settings.min_score:
                 below_score += 1
                 llm_skipped_below_threshold += 1
                 logger.info(
                     "Below threshold commercial fit: %s (%d < %d)",
-                    domain, s.value, settings.min_score,
+                    domain, fit.score, settings.min_score,
                 )
                 logger.info(
                     "Skipping LLM analysis for %s: commercial score below threshold",
@@ -183,8 +182,8 @@ def run(limit: int | None = None) -> dict:
                     "source_url": hit.url,
                     "summary": "",
                     "services": "",
-                    "score": s.value,
-                    "score_reasons": json.dumps(s.reasons),
+                    "score": fit.score,
+                    "score_reasons": json.dumps(fit.reasons),
                     "fit_reason": "",
                     "proof_project": "",
                     "outreach_angle": "",
@@ -192,6 +191,7 @@ def run(limit: int | None = None) -> dict:
                     "contact_source": "",
                     "contact_name": "",
                     "contact_role": "",
+                    "contact_quality": "",
                     "status": "rejected-fit",
                 })
                 processed += 1
@@ -204,8 +204,9 @@ def run(limit: int | None = None) -> dict:
                 no_contact += 1
                 logger.info("No contact email for %s; drafting anyway", domain)
 
-            analysis = analyze_agency(company, site["root"], site["text"])
+            # Count the attempt BEFORE the call so a raise still increments.
             llm_analysis_calls += 1
+            analysis = analyze_agency(company, site["root"], site["text"])
 
             lead_id = upsert_lead({
                 "company": company,
@@ -215,8 +216,8 @@ def run(limit: int | None = None) -> dict:
                 "source_url": hit.url,
                 "summary": analysis.get("summary", ""),
                 "services": analysis.get("services", ""),
-                "score": s.value,
-                "score_reasons": json.dumps(s.reasons),
+                "score": fit.score,
+                "score_reasons": json.dumps(fit.reasons),
                 "fit_reason": analysis.get("fit_reason", ""),
                 "proof_project": analysis.get("proof_project", "WingerX"),
                 "outreach_angle": analysis.get("outreach_angle", ""),
@@ -224,6 +225,8 @@ def run(limit: int | None = None) -> dict:
                 "status": "qualified",
             })
 
+            # Count the attempt BEFORE the call so a raise still increments.
+            outreach_draft_calls += 1
             subject, body = draft_outreach(
                 company,
                 analysis.get("fit_reason", ""),
@@ -259,6 +262,7 @@ def run(limit: int | None = None) -> dict:
         "below_score": below_score,
         "llm_analysis_calls": llm_analysis_calls,
         "llm_skipped_below_threshold": llm_skipped_below_threshold,
+        "outreach_draft_calls": outreach_draft_calls,
         "outreach_drafts_generated": outreach_drafts_generated,
         "duration_s": round(batch_elapsed, 1),
         "failures": failures,
@@ -298,9 +302,10 @@ def _log_summary(summary: dict) -> None:
         "",
         "LLM",
         "---",
-        f"Analysis calls:              {summary['llm_analysis_calls']}",
-        f"Skipped below threshold:     {summary['llm_skipped_below_threshold']}",
-        f"Outreach drafts generated:   {summary['outreach_drafts_generated']}",
+        f"Analysis calls (attempted):    {summary['llm_analysis_calls']}",
+        f"Skipped below threshold:       {summary['llm_skipped_below_threshold']}",
+        f"Outreach calls (attempted):    {summary['outreach_draft_calls']}",
+        f"Outreach drafts generated:     {summary['outreach_drafts_generated']}",
         "",
         f"Duration:             {summary['duration_s']}s",
     ]

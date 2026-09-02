@@ -132,3 +132,37 @@ def test_sub_scores_exposed():
     assert fit.commercial_score >= 0
     assert 0 <= fit.technical_score <= 100
     assert 0 <= fit.commercial_score <= 100
+
+
+# ---------------------------------------------------------------------------
+# R1-4: Training category must be reachable
+# ---------------------------------------------------------------------------
+
+TRAINING_TEXT = (
+    "Welcome to our academy. We offer an online course in AI development "
+    "and a bootcamp program for aspiring engineers. Enroll in course today. "
+    "Our certification program and course curriculum are designed for "
+    "hands-on learning. Cohort-based sessions start every month."
+)
+
+
+def test_training_category_reachable():
+    """A training-centric site with no agency identity should be categorized
+    as 'training'."""
+    fit = score_commercial_fit(TRAINING_TEXT)
+    assert fit.category == "training"
+    assert fit.score < 70
+
+
+def test_training_not_triggered_for_agency_with_employee_training():
+    """A real agency that mentions employee training should NOT be
+    categorized as training."""
+    text = (
+        "We are an AI development agency providing custom software and AI development services "
+        "for clients. We build AI agents and automation for clients. See our case studies. "
+        "We also offer training programs for our engineers to upskill them."
+    )
+    fit = score_commercial_fit(text)
+    # Should be agency, not training
+    assert fit.category in ("agency", "consultancy")
+    assert fit.category != "training"
