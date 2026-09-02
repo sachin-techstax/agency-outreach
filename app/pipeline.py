@@ -4,6 +4,7 @@ import json
 import time
 from urllib.parse import urlparse
 
+from .candidate_filter import evaluate_candidate, normalize_domain
 from .config import settings
 from .contacts import discover_contact
 from .db import upsert_lead, update_lead
@@ -11,7 +12,7 @@ from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
 from .scoring import score_agency
 from .scrape import crawl_company, domain_of, root_url
-from .search import BLOCKED_HOSTS, DEFAULT_QUERIES, search_serper
+from .search import DEFAULT_QUERIES, search_serper
 
 logger = get_logger("pipeline")
 
@@ -45,18 +46,26 @@ def _classify_failure(exc: Exception) -> str:
     return name
 
 
-def _discover_candidates(target: int) -> dict:
-    """Run discovery searches and return unique candidate domains.
+def _discover_candidates(target: int) -> tuple[dict, dict]:
+    """Run discovery searches, filter candidates, and return eligible domains.
 
-    Raises ``RuntimeError`` if every configured search query fails, so the
-    caller does not proceed with an apparently successful empty batch.
-    A successful search that returns zero organic results is not treated as
-    a failure.
+    Returns a tuple of ``(candidates, discovery_stats)`` where *candidates* maps
+    eligible domain strings to their first accepted :class:`SearchHit` and
+    *discovery_stats* contains ``raw_candidate_domains``,
+    ``rejected_candidate_domains``, and ``candidate_domains`` counts.
+
+    Raises ``RuntimeError`` if every configured search query fails.  A
+    successful search that returns zero organic results is not treated as a
+    failure.  If all results are rejected by candidate filtering, an empty
+    candidates dict is returned (this is NOT a search failure).
     """
     candidates: dict[str, object] = {}
+    raw_domains: set[str] = set()
+    rejected_domains: set[str] = set()
     search_attempts = 0
     search_success = 0
     search_failed = 0
+
     for query in DEFAULT_QUERIES:
         search_attempts += 1
         try:
@@ -67,9 +76,17 @@ def _discover_candidates(target: int) -> dict:
             continue
         search_success += 1
         for hit in hits:
-            domain = domain_of(hit.url)
-            host = urlparse(hit.url).netloc.lower()
-            if not domain or host in BLOCKED_HOSTS:
+            domain = normalize_domain(hit.url)
+            if not domain:
+                continue
+            if domain in raw_domains:
+                continue
+            raw_domains.add(domain)
+
+            decision = evaluate_candidate(hit)
+            if not decision.accepted:
+                rejected_domains.add(domain)
+                logger.debug("Rejected %s: %s", domain, decision.reason)
                 continue
             if domain not in candidates:
                 candidates[domain] = hit
@@ -77,6 +94,7 @@ def _discover_candidates(target: int) -> dict:
                 break
         if len(candidates) >= target * 3:
             break
+
     logger.info(
         "Discovery searches: attempted=%d success=%d failed=%d",
         search_attempts,
@@ -87,8 +105,26 @@ def _discover_candidates(target: int) -> dict:
         raise RuntimeError(
             f"Agency discovery failed: all {search_attempts} Serper searches failed."
         )
-    logger.info("Discovered %d unique candidate domains", len(candidates))
-    return candidates
+
+    stats = {
+        "raw_candidate_domains": len(raw_domains),
+        "rejected_candidate_domains": len(rejected_domains),
+        "candidate_domains": len(candidates),
+    }
+    logger.info(
+        "Discovery filtering: raw_domains=%d rejected=%d eligible=%d",
+        stats["raw_candidate_domains"],
+        stats["rejected_candidate_domains"],
+        stats["candidate_domains"],
+    )
+    if search_success > 0 and len(candidates) == 0:
+        logger.info(
+            "Search completed successfully, but no eligible agency candidates "
+            "remained after filtering."
+        )
+    else:
+        logger.info("Discovered %d eligible candidate domains", len(candidates))
+    return candidates, stats
 
 
 def run(limit: int | None = None) -> dict:
@@ -96,7 +132,7 @@ def run(limit: int | None = None) -> dict:
     batch_start = time.perf_counter()
     logger.info("Starting agency discovery. Target: %d", target)
 
-    candidates = _discover_candidates(target)
+    candidates, discovery_stats = _discover_candidates(target)
 
     attempted = 0
     processed = 0
@@ -184,7 +220,9 @@ def run(limit: int | None = None) -> dict:
         "attempted": attempted,
         "processed": processed,
         "drafted": drafted,
-        "candidate_domains": len(candidates),
+        "candidate_domains": discovery_stats["candidate_domains"],
+        "raw_candidate_domains": discovery_stats["raw_candidate_domains"],
+        "rejected_candidate_domains": discovery_stats["rejected_candidate_domains"],
         "qualified": qualified,
         "skipped": skipped,
         "failed": failed,
@@ -209,7 +247,14 @@ def _log_summary(summary: dict) -> None:
     lines = [
         "Batch complete",
         "--------------",
-        f"Candidates discovered: {summary['candidate_domains']}",
+        "Discovery",
+        "---------",
+        f"Raw candidate domains:      {summary['raw_candidate_domains']}",
+        f"Rejected before crawl:       {summary['rejected_candidate_domains']}",
+        f"Eligible candidate domains:  {summary['candidate_domains']}",
+        "",
+        "Attempts",
+        "--------",
         f"Attempted:            {summary['attempted']}",
         f"Processed:            {summary['processed']}",
         f"Qualified:            {summary['qualified']}",

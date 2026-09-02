@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from .candidate_filter import BLOCKED_DOMAINS
 from .config import settings
 from .logging_config import get_logger
 
@@ -20,11 +21,10 @@ DEFAULT_QUERIES = [
     '"workflow automation" agency AI',
 ]
 
-BLOCKED_HOSTS = {
-    "linkedin.com", "www.linkedin.com", "facebook.com", "www.facebook.com",
-    "x.com", "twitter.com", "instagram.com", "youtube.com", "www.youtube.com",
-    "clutch.co", "upwork.com", "contra.com", "medium.com",
-}
+# Kept for backwards compatibility.  New code should use
+# ``app.candidate_filter.BLOCKED_DOMAINS`` and ``is_blocked_domain`` for
+# safe normalized suffix matching.
+BLOCKED_HOSTS = BLOCKED_DOMAINS
 
 
 @dataclass
