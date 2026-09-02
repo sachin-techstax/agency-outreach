@@ -142,11 +142,13 @@ def run(limit: int | None = None) -> dict:
                 **contact,
                 "status": "qualified" if s.value >= settings.min_score else "discovered",
             })
-            processed += 1
 
             if s.value < settings.min_score:
                 below_score += 1
                 logger.info("Below threshold (%d < %d): %s", s.value, settings.min_score, domain)
+                # Below-threshold agencies completed their expected processing
+                # path successfully, so they count as processed.
+                processed += 1
                 continue
 
             qualified += 1
@@ -163,6 +165,11 @@ def run(limit: int | None = None) -> dict:
             update_lead(lead_id, subject=subject, draft=body, status="drafted")
             drafted += 1
             logger.info("Draft created for %s", domain)
+            # Only count as processed after the full qualified path (including
+            # outreach generation and final status update) succeeds. If any of
+            # those raise, the except block counts this attempt as failed
+            # instead, keeping the invariant attempted == processed + skipped + failed.
+            processed += 1
         except Exception as exc:
             logger.exception("Failed processing agency %s", domain)
             failed += 1

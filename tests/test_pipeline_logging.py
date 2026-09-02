@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from unittest.mock import patch
 
@@ -289,7 +290,7 @@ def test_cli_banner_shows_effective_limit(tmp_path, monkeypatch, capsys):
 
     from app.cli import _startup_banner
 
-    _startup_banner(effective_limit=7)
+    _startup_banner(effective_limit=7, effective_log_level="INFO")
     out = capsys.readouterr().out
     assert "Limit:            7" in out
     # Must not show the default discovery_limit when an explicit limit is passed
@@ -493,3 +494,164 @@ def test_search_returning_zero_results_is_not_failure(tmp_path, monkeypatch):
     result = run_pipeline(limit=1)
     assert result["candidate_domains"] == 0
     assert result["attempted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# R2-1: Outcome counter invariant — processed and failed are mutually exclusive.
+# ---------------------------------------------------------------------------
+
+
+def test_draft_outreach_failure_counts_as_failed_not_processed(tmp_path, monkeypatch):
+    """If draft_outreach raises after a successful crawl/analysis/upsert,
+    the attempt must count as failed (not processed) so the invariant
+    attempted == processed + skipped + failed holds."""
+    _set_db(tmp_path)
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+
+    def failing_draft(company, fit, proof, angle):
+        raise RuntimeError("LLM outreach generation exploded")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", failing_draft)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 0
+    assert result["skipped"] == 0
+    assert result["failed"] == 1
+    assert result["drafted"] == 0
+    # Invariant must hold
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+    assert any(d == "example.ai" for d, _ in result["failures"])
+
+
+def test_db_update_failure_after_qualification_counts_as_failed(tmp_path, monkeypatch):
+    """If the final update_lead (status=drafted) raises after qualification,
+    the attempt must count as failed, not processed."""
+    _set_db(tmp_path)
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    original_update_lead = pipeline_mod.update_lead
+
+    def failing_update(lead_id, **updates):
+        if updates.get("status") == "drafted":
+            raise sqlite3.OperationalError("database is locked")
+        return original_update_lead(lead_id, **updates)
+
+    monkeypatch.setattr(pipeline_mod, "update_lead", failing_update)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 0
+    assert result["skipped"] == 0
+    assert result["failed"] == 1
+    assert result["drafted"] == 0
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+
+
+def test_invariant_holds_on_mixed_batch_with_late_failure(tmp_path, monkeypatch):
+    """A batch with a successful agency, a late-failing agency, and a skipped
+    agency must still satisfy attempted == processed + skipped + failed."""
+    _set_db(tmp_path)
+    _setup_search(["good.com", "late-fail.com", "empty.com"], monkeypatch)
+
+    def fake_crawl(url):
+        if "empty.com" in url:
+            return _make_site("tiny", "empty.com")  # < 200 chars -> skipped
+        domain = "good.com" if "good.com" in url else "late-fail.com"
+        return _make_site(STRONG_TEXT, domain, title=domain)
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fake_crawl)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+
+    def conditional_draft(company, fit, proof, angle):
+        if "late-fail" in company.lower():
+            raise RuntimeError("outreach generation failed for late-fail")
+        return ("Subject", "Body")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", conditional_draft)
+
+    result = run_pipeline(limit=3)
+
+    assert result["attempted"] == 3
+    assert result["processed"] == 1  # only good.com
+    assert result["skipped"] == 1    # empty.com
+    assert result["failed"] == 1     # late-fail.com
+    assert result["drafted"] == 1
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+
+
+# ---------------------------------------------------------------------------
+# R2-2: Banner must show the effective log level for the invocation.
+# ---------------------------------------------------------------------------
+
+
+def test_cli_banner_shows_verbose_log_level(tmp_path, monkeypatch, capsys):
+    _set_db(tmp_path)
+    object.__setattr__(settings, "serper_api_key", "fake-key")
+    object.__setattr__(settings, "log_level", "INFO")
+
+    from app.cli import _startup_banner
+
+    _startup_banner(effective_limit=5, effective_log_level="DEBUG")
+    out = capsys.readouterr().out
+    assert "Log level:        DEBUG" in out
+    assert "Log level:        INFO" not in out
+
+
+def test_cli_banner_shows_env_log_level_without_verbose(tmp_path, monkeypatch, capsys):
+    _set_db(tmp_path)
+    object.__setattr__(settings, "serper_api_key", "fake-key")
+    object.__setattr__(settings, "log_level", "INFO")
+
+    from app.cli import _startup_banner
+
+    _startup_banner(effective_limit=5, effective_log_level="INFO")
+    out = capsys.readouterr().out
+    assert "Log level:        INFO" in out

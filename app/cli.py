@@ -29,7 +29,7 @@ def main_callback(
     configure_logging()
 
 
-def _startup_banner(effective_limit: int) -> None:
+def _startup_banner(effective_limit: int, effective_log_level: str) -> None:
     openai_enabled = "enabled" if settings.openai_api_key else "disabled (deterministic fallback)"
     serper_configured = "configured" if settings.serper_api_key else "MISSING"
     lines = [
@@ -40,7 +40,7 @@ def _startup_banner(effective_limit: int) -> None:
         f"OpenAI:           {openai_enabled}",
         f"Serper:           {serper_configured}",
         f"Database:         {settings.db_path}",
-        f"Log level:        {settings.log_level}",
+        f"Log level:        {effective_log_level}",
     ]
     print("\n".join(lines))
 
@@ -65,6 +65,7 @@ def run_cmd(
     limit: int = typer.Option(None, help="Max agency sites to process"),
     verbose: bool = typer.Option(False, "--verbose", help="Enable DEBUG logging for this run"),
 ):
+    effective_log_level = "DEBUG" if verbose else settings.log_level
     if verbose:
         configure_logging(level=logging.DEBUG)
     if not settings.serper_api_key:
@@ -72,7 +73,7 @@ def run_cmd(
             "SERPER_API_KEY is missing. Add it to .env before running the pipeline."
         )
     effective_limit = limit or settings.discovery_limit
-    _startup_banner(effective_limit)
+    _startup_banner(effective_limit, effective_log_level)
     result = run_pipeline(effective_limit)
     console.print(result)
 
