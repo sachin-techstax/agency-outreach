@@ -1,11 +1,27 @@
 import type { DashboardData, Lead, LeadList, Meta } from "./types";
 
+const TOKEN_KEY = "pactsignal_api_token";
+
+export function getAccessToken(): string {
+  return sessionStorage.getItem(TOKEN_KEY) ?? "";
+}
+
+export function setAccessToken(token: string): void {
+  sessionStorage.setItem(TOKEN_KEY, token.trim());
+}
+
+export function clearAccessToken(): void {
+  sessionStorage.removeItem(TOKEN_KEY);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Content-Type", "application/json");
 
+  const token = getAccessToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
   const response = await fetch(path, {
-    credentials: "same-origin",
     ...init,
     headers
   });
@@ -24,21 +40,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export type AuthSession = {
-  authenticated: boolean;
-  username: string;
-  auth_enabled: boolean;
-  expires_in_seconds?: number;
-};
-
 export const api = {
-  session: () => request<AuthSession>("/api/auth/session"),
-  login: (username: string, password: string) =>
-    request<AuthSession>("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ username, password })
-    }),
-  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   meta: () => request<Meta>("/api/meta"),
   dashboard: () => request<DashboardData>("/api/dashboard"),
   leads: (params: { q?: string; status?: string; minScore?: number; limit?: number } = {}) => {
