@@ -40,6 +40,8 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     log_file: str = os.getenv("LOG_FILE", "").strip()
     pactsignal_demo_mode: bool = _bool("PACTSIGNAL_DEMO_MODE", False)
+    pactsignal_auth_enabled: bool = _bool("PACTSIGNAL_AUTH_ENABLED", False)
+    pactsignal_api_token: str = os.getenv("PACTSIGNAL_API_TOKEN", "").strip()
 
 
 settings = Settings()

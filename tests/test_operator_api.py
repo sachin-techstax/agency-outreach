@@ -12,11 +12,16 @@ from app.db import get_lead, upsert_lead, update_lead
 
 @pytest.fixture(autouse=True)
 def restore_settings():
-    original_demo = settings.pactsignal_demo_mode
-    original_db = settings.db_path
+    names = [
+        "pactsignal_demo_mode",
+        "db_path",
+        "pactsignal_auth_enabled",
+        "pactsignal_api_token",
+    ]
+    original = {name: getattr(settings, name) for name in names}
     yield
-    object.__setattr__(settings, "pactsignal_demo_mode", original_demo)
-    object.__setattr__(settings, "db_path", original_db)
+    for name, value in original.items():
+        object.__setattr__(settings, name, value)
 
 
 def test_demo_dashboard_and_leads_are_safe():
@@ -149,3 +154,58 @@ def test_spa_path_containment_rejects_parent_escape(tmp_path: Path, monkeypatch)
 
     with pytest.raises(ValueError):
         candidate.relative_to(dist_root)
+
+
+def _enable_test_auth() -> str:
+    token = "test-token-" + ("x" * 40)
+    object.__setattr__(settings, "pactsignal_auth_enabled", True)
+    object.__setattr__(settings, "pactsignal_api_token", token)
+    return token
+
+
+def test_auth_enabled_keeps_health_public_but_protects_operator_api():
+    _enable_test_auth()
+    client = TestClient(api_mod.app)
+
+    health = client.get("/api/health")
+    assert health.status_code == 200
+    assert health.json()["auth_enabled"] is True
+
+    dashboard = client.get("/api/dashboard")
+    assert dashboard.status_code == 401
+    assert dashboard.json()["detail"] == "Valid PactSignal bearer token required"
+    assert dashboard.headers["www-authenticate"] == "Bearer"
+
+
+def test_valid_bearer_token_unlocks_operator_api():
+    token = _enable_test_auth()
+    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    client = TestClient(api_mod.app)
+
+    response = client.get(
+        "/api/dashboard",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "demo"
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        "",
+        "Basic abc123",
+        "Bearer wrong-token",
+        "Token test-token",
+    ],
+)
+def test_invalid_or_missing_api_token_is_rejected(authorization: str | None):
+    _enable_test_auth()
+    client = TestClient(api_mod.app)
+    headers = {"Authorization": authorization} if authorization else {}
+
+    response = client.get("/api/meta", headers=headers)
+
+    assert response.status_code == 401

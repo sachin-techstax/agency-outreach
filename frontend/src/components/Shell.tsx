@@ -1,7 +1,8 @@
-import { Activity, LayoutDashboard, Radar, Rows3, Send, Sparkles } from "lucide-react";
+import { Activity, LayoutDashboard, LogOut, Radar, Rows3, Send, Sparkles } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { signOutOperator } from "../App";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -52,6 +53,14 @@ export function Shell() {
             <strong>Sachin</strong>
           </div>
           <span>{meta.data?.demo_mode ? "Demo mode · read-only" : "Private mode"}</span>
+          <button
+            className="sidebar-logout"
+            type="button"
+            onClick={signOutOperator}
+          >
+            <LogOut size={12} />
+            Sign out
+          </button>
         </div>
       </aside>
       <main className="workspace">

@@ -7,11 +7,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .auth import validate_auth_config, valid_api_token
 from .config import settings
 from .db import (
     SUPPRESSED_STATUSES,
@@ -46,6 +47,34 @@ app.add_middleware(
 _RUN_LOCK = threading.Lock()
 _LATEST_RUN: dict[str, Any] | None = None
 
+_PUBLIC_API_PATHS = {"/api/health"}
+
+
+@app.on_event("startup")
+def _validate_auth_startup() -> None:
+    validate_auth_config()
+
+
+@app.middleware("http")
+async def _operator_auth(request: Request, call_next):
+    if not settings.pactsignal_auth_enabled or request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    if not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
+        return await call_next(request)
+
+    if not valid_api_token(request.headers.get("Authorization")):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Valid PactSignal bearer token required"},
+            headers={
+                "Cache-Control": "no-store",
+                "WWW-Authenticate": "Bearer",
+            },
+        )
+
+    return await call_next(request)
 
 def _parse_list(value: Any) -> list[str]:
     if not value:
@@ -111,6 +140,7 @@ def health() -> dict:
         "ok": True,
         "product": "PactSignal",
         "demo_mode": settings.pactsignal_demo_mode,
+        "auth_enabled": settings.pactsignal_auth_enabled,
     }
 
 
