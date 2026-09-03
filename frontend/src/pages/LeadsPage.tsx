@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
+import { LockKeyhole, Search } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
@@ -7,6 +7,7 @@ import { EmptyState, LeadAvatar, Score, StatusPill, fmtAge } from "../components
 
 export function LeadsPage() {
   const navigate = useNavigate();
+  const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
   const [minScore, setMinScore] = useState(0);
@@ -35,11 +36,22 @@ export function LeadsPage() {
           <h1>Leads</h1>
           <p>Research, qualify and move prospects through outreach.</p>
         </div>
+        <div className="header-actions">
+          {meta.data?.demo_mode && (
+            <span className="mode-pill">
+              <LockKeyhole size={12} />
+              Demo · read-only
+            </span>
+          )}
+          <button className="button primary" disabled={meta.data?.demo_mode} onClick={()=>navigate("/")}>
+            Run discovery
+          </button>
+        </div>
       </header>
 
       <section className="page-body">
         <section className="panel leads-toolbar">
-          <div><strong>{leads.data?.total ?? "—"} leads</strong><span>sorted by commercial fit</span></div>
+          <div><strong>{leads.data?.total ?? "—"} leads</strong><span>{leads.data ? `${leads.data.items.filter((lead)=>!["drafted","approved","gmail_drafted","sent","do_not_contact"].includes(lead.status)).length} fresh or retryable in this view` : "sorted by commercial fit"}</span></div>
           <label className="search-input"><Search size={14}/><input value={q} onChange={(e)=>setQ(e.target.value)} placeholder="Search company, domain or proof" /></label>
           <select value={status} onChange={(e)=>setStatus(e.target.value)}>
             <option value="">All statuses</option><option value="drafted">Drafted</option><option value="approved">Approved</option><option value="qualified">Qualified</option><option value="sent">Sent</option><option value="rejected-fit">Rejected fit</option><option value="do_not_contact">Do not contact</option>
@@ -66,7 +78,7 @@ export function LeadsPage() {
               <div className="preview-title"><div><h2>{selected.data.company}</h2><p>{selected.data.domain}</p></div><Score value={selected.data.score}/></div>
               <div className="section-rule"/>
               <Label>Why it fits</Label><p className="preview-copy">{selected.data.fit_reason || selected.data.summary || "No fit narrative yet."}</p>
-              <Label>Selected proof</Label><div className="proof-card"><strong>{selected.data.proof_project || "—"}</strong><p>{selected.data.outreach_angle || "Proof selection will appear after qualification."}</p></div>
+              <Label>Selected proof</Label><div className="proof-card"><strong>{selected.data.proof_project || "—"}</strong><p>{proofDescription(selected.data.proof_project)}</p></div>
               <Label>Contact</Label><div className="contact-line"><strong>{selected.data.contact_email || "No public email found"}</strong><span>{selected.data.contact_quality ? `${selected.data.contact_quality} confidence` : "—"}</span></div>
               <div className="section-rule"/>
               <Label>Next action</Label><button className="button primary full" onClick={()=>navigate(`/leads/${selected.data.id}`)}>Open lead review</button>
@@ -80,3 +92,10 @@ export function LeadsPage() {
 }
 
 function Label({children}:{children:ReactNode}){return <div className="field-label">{children}</div>;}
+
+function proofDescription(proof?: string) {
+  if (proof === "WingerX") return "AI automation and business orchestration platform with agents, CRM, integrations and scheduled workflows.";
+  if (proof === "Forge Crew") return "Local-first multi-agent software engineering orchestrator with planning, implementation, review and human approval.";
+  if (proof === "Aegis") return "Autonomous AI code-review and repository-hygiene agent with deterministic scanning and human approval.";
+  return "Relevant portfolio proof selected during qualification.";
+}
