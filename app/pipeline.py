@@ -5,26 +5,18 @@ import time
 from urllib.parse import urlparse
 
 from .candidate_filter import evaluate_candidate, normalize_domain
+from .commercial_fit import score_commercial_fit
+from .company_identity import extract_company_name
 from .config import settings
 from .contacts import discover_contact
-from .db import upsert_lead, update_lead
+from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead_by_domain
 from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
-from .scoring import score_agency
 from .scrape import crawl_company, domain_of, root_url
 from .search import DEFAULT_QUERIES, search_serper
 
 logger = get_logger("pipeline")
-
-
-def company_from(title: str, domain: str) -> str:
-    if title:
-        for sep in [" | ", " - ", " — ", " – "]:
-            if sep in title:
-                title = title.split(sep)[0]
-        if 2 <= len(title.strip()) <= 80:
-            return title.strip()
-    return domain.split(".")[0].replace("-", " ").title()
+qual_logger = get_logger("qualification")
 
 
 def _classify_failure(exc: Exception) -> str:
@@ -78,31 +70,19 @@ def _discover_candidates(target: int) -> tuple[dict, dict]:
             domain = normalize_domain(hit.url)
             if not domain:
                 continue
-            # Record every unique domain we observe, even if we later reject
-            # it -- raw_candidate_domains counts all observed domains.
             raw_domains.add(domain)
-
-            # If we already accepted a hit for this domain, skip later hits.
-            # This deduplicates by normalized domain.
             if domain in candidates:
                 continue
-
-            # Evaluate the current hit.  A rejected hit does NOT permanently
-            # reject the domain -- a later hit from the same domain may be
-            # acceptable (e.g. a listicle blog post followed by a services page).
             decision = evaluate_candidate(hit)
             if not decision.accepted:
                 logger.debug("Rejected %s: %s", domain, decision.reason)
                 continue
-
-            # First acceptable hit wins.
             candidates[domain] = hit
             if len(candidates) >= target * 3:
                 break
         if len(candidates) >= target * 3:
             break
 
-    # Domains that were observed but never accepted.
     rejected_domains = raw_domains - set(candidates.keys())
 
     logger.info(
@@ -154,6 +134,14 @@ def run(limit: int | None = None) -> dict:
     below_score = 0
     failures: list[tuple[str, str]] = []
 
+    # LLM cost counters (attempted = API call invoked, even if it raises)
+    llm_analysis_calls = 0          # analyze_agency invocations attempted
+    llm_skipped_below_threshold = 0 # candidates that skipped LLM entirely
+    outreach_draft_calls = 0        # draft_outreach invocations attempted
+    outreach_drafts_generated = 0   # draft_outreach calls that succeeded
+    protected_existing = 0          # existing leads found in protected state
+    protected_outreach_skipped = 0  # protected leads where outreach was skipped
+
     for domain, hit in candidates.items():
         if attempted >= target:
             break
@@ -166,10 +154,84 @@ def run(limit: int | None = None) -> dict:
                 logger.warning("Skipping %s: insufficient content (%d chars)", domain, len(site["text"]))
                 skipped += 1
                 continue
-            company = company_from(site["title"] or hit.title, domain)
-            s = score_agency(site["text"])
-            logger.info("%s score: %d", domain, s.value)
+
+            # --- deterministic commercial-fit qualification (single source of truth) ---
+            company = extract_company_name(site["title"] or hit.title, domain)
+            fit = score_commercial_fit(site["text"])
+            qual_logger.info(
+                "%s commercial category=%s score=%d",
+                domain, fit.category, fit.score,
+            )
+            logger.info("%s score: %d category: %s", domain, fit.score, fit.category)
+
+            # --- check for existing protected lead ---
+            existing = get_lead_by_domain(site["domain"])
+            if existing and is_workflow_state_protected(existing["status"]):
+                protected_existing += 1
+                protected_outreach_skipped += 1
+                logger.info(
+                    "Existing protected lead %s status=%s; preserving workflow "
+                    "state and skipping outreach regeneration",
+                    domain, existing["status"],
+                )
+                # Refresh only safe deterministic research metadata.
+                # upsert_lead() will drop protected fields automatically.
+                upsert_lead({
+                    "company": company,
+                    "domain": site["domain"],
+                    "website": site["root"],
+                    "source_query": hit.query,
+                    "source_url": hit.url,
+                    "score": fit.score,
+                    "score_reasons": json.dumps(fit.reasons),
+                })
+                processed += 1
+                continue
+
+            # --- below threshold: persist lightweight lead, skip LLM ---
+            if fit.score < settings.min_score:
+                below_score += 1
+                llm_skipped_below_threshold += 1
+                logger.info(
+                    "Below threshold commercial fit: %s (%d < %d)",
+                    domain, fit.score, settings.min_score,
+                )
+                logger.info(
+                    "Skipping LLM analysis for %s: commercial score below threshold",
+                    domain,
+                )
+                upsert_lead({
+                    "company": company,
+                    "domain": site["domain"],
+                    "website": site["root"],
+                    "source_query": hit.query,
+                    "source_url": hit.url,
+                    "summary": "",
+                    "services": "",
+                    "score": fit.score,
+                    "score_reasons": json.dumps(fit.reasons),
+                    "fit_reason": "",
+                    "proof_project": "",
+                    "outreach_angle": "",
+                    "contact_email": "",
+                    "contact_source": "",
+                    "contact_name": "",
+                    "contact_role": "",
+                    "contact_quality": "",
+                    "status": "rejected-fit",
+                })
+                processed += 1
+                continue
+
+            # --- qualified: run LLM analysis + contact discovery + outreach ---
+            qualified += 1
             contact = discover_contact(site["text"], site["pages"], site["domain"])
+            if not contact.get("contact_email"):
+                no_contact += 1
+                logger.info("No contact email for %s; drafting anyway", domain)
+
+            # Count the attempt BEFORE the call so a raise still increments.
+            llm_analysis_calls += 1
             analysis = analyze_agency(company, site["root"], site["text"])
 
             lead_id = upsert_lead({
@@ -180,41 +242,27 @@ def run(limit: int | None = None) -> dict:
                 "source_url": hit.url,
                 "summary": analysis.get("summary", ""),
                 "services": analysis.get("services", ""),
-                "score": s.value,
-                "score_reasons": json.dumps(s.reasons),
+                "score": fit.score,
+                "score_reasons": json.dumps(fit.reasons),
                 "fit_reason": analysis.get("fit_reason", ""),
                 "proof_project": analysis.get("proof_project", "WingerX"),
                 "outreach_angle": analysis.get("outreach_angle", ""),
                 **contact,
-                "status": "qualified" if s.value >= settings.min_score else "discovered",
+                "status": "qualified",
             })
 
-            if s.value < settings.min_score:
-                below_score += 1
-                logger.info("Below threshold (%d < %d): %s", s.value, settings.min_score, domain)
-                # Below-threshold agencies completed their expected processing
-                # path successfully, so they count as processed.
-                processed += 1
-                continue
-
-            qualified += 1
-            if not contact.get("contact_email"):
-                no_contact += 1
-                logger.info("No contact email for %s; drafting anyway", domain)
-
+            # Count the attempt BEFORE the call so a raise still increments.
+            outreach_draft_calls += 1
             subject, body = draft_outreach(
                 company,
                 analysis.get("fit_reason", ""),
                 analysis.get("proof_project", "WingerX"),
                 analysis.get("outreach_angle", ""),
             )
+            outreach_drafts_generated += 1
             update_lead(lead_id, subject=subject, draft=body, status="drafted")
             drafted += 1
             logger.info("Draft created for %s", domain)
-            # Only count as processed after the full qualified path (including
-            # outreach generation and final status update) succeeds. If any of
-            # those raise, the except block counts this attempt as failed
-            # instead, keeping the invariant attempted == processed + skipped + failed.
             processed += 1
         except Exception as exc:
             logger.exception("Failed processing agency %s", domain)
@@ -238,6 +286,12 @@ def run(limit: int | None = None) -> dict:
         "failed": failed,
         "no_contact": no_contact,
         "below_score": below_score,
+        "llm_analysis_calls": llm_analysis_calls,
+        "llm_skipped_below_threshold": llm_skipped_below_threshold,
+        "outreach_draft_calls": outreach_draft_calls,
+        "outreach_drafts_generated": outreach_drafts_generated,
+        "protected_existing": protected_existing,
+        "protected_outreach_skipped": protected_outreach_skipped,
         "duration_s": round(batch_elapsed, 1),
         "failures": failures,
     }
@@ -273,6 +327,16 @@ def _log_summary(summary: dict) -> None:
         f"No contact found:     {summary['no_contact']}",
         f"Skipped:              {summary['skipped']}",
         f"Failed:               {summary['failed']}",
+        "",
+        "LLM",
+        "---",
+        f"Analysis calls (attempted):    {summary['llm_analysis_calls']}",
+        f"Skipped below threshold:       {summary['llm_skipped_below_threshold']}",
+        f"Outreach calls (attempted):    {summary['outreach_draft_calls']}",
+        f"Outreach drafts generated:     {summary['outreach_drafts_generated']}",
+        f"Protected existing:            {summary['protected_existing']}",
+        f"Protected outreach skipped:    {summary['protected_outreach_skipped']}",
+        "",
         f"Duration:             {summary['duration_s']}s",
     ]
     if summary["failures"]:
@@ -280,6 +344,4 @@ def _log_summary(summary: dict) -> None:
         lines.append("Failures:")
         for domain, reason in summary["failures"]:
             lines.append(f"- {domain}: {reason}")
-    # Use print for the final formatted block so it renders as a clean summary
-    # regardless of log level (operational logging still flows through logger).
     print("\n".join(lines))

@@ -36,11 +36,15 @@ def _make_site(text: str, domain: str, title: str = "Example") -> dict:
 
 
 STRONG_TEXT = (
-    "Generative AI development agency. We build AI agents, workflow automation, "
-    "custom software, RAG systems, APIs and backend products. See our client case studies. "
+    "We are an AI development agency providing custom software and AI development services "
+    "for clients. We build AI agents, workflow automation, RAG systems, APIs and backend products. "
+    "See our case studies and client projects. Our delivery team helps companies with "
+    "AI implementation and system integration. We are a technology partner and development partner "
+    "offering engineering services and implementation services. "
     "We deliver production AI systems for clients across multiple industries. "
     "Our team specializes in LLM development, retrieval augmented generation, "
-    "and end-to-end AI product engineering. Contact us at hello@example.ai"
+    "machine learning, data engineering, and end-to-end AI product engineering. "
+    "Contact us at hello@example.ai"
 )
 
 
@@ -963,3 +967,565 @@ def test_same_domain_two_rejected(tmp_path, monkeypatch):
     assert result["rejected_candidate_domains"] == 1
     assert result["candidate_domains"] == 0
     assert result["attempted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Commercial fit: LLM must NOT be called for below-threshold candidates.
+# ---------------------------------------------------------------------------
+
+WEAK_TEXT = (
+    "AI agent platform for building conversational AI. Start free today. "
+    "Pricing plans for every team. Our SaaS platform offers self-service "
+    "deployment. Subscribe to our developer platform today. API documentation and "
+    "developer tools available. Product documentation and SDK access. "
+    "Sign up free and start building your first AI agent in minutes. "
+    "Our self-service platform makes it easy to deploy AI solutions."
+)
+
+
+def test_below_threshold_skips_llm_analysis_and_outreach(tmp_path, monkeypatch):
+    """A below-threshold candidate must NOT invoke analyze_agency or
+    draft_outreach.  The pipeline should persist lightweight lead data and
+    count it as processed + below_score."""
+    _set_db(tmp_path)
+    _setup_search(["saas-platform.com"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "saas-platform.com")
+    )
+
+    # If analyze_agency is called, raise to make the test fail loudly.
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("analyze_agency should NOT be called for below-threshold candidate")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", fail_if_called)
+
+    def fail_draft_if_called(*args, **kwargs):
+        raise AssertionError("draft_outreach should NOT be called for below-threshold candidate")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fail_draft_if_called)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 1
+    assert result["qualified"] == 0
+    assert result["drafted"] == 0
+    assert result["failed"] == 0
+    # LLM counters
+    assert result["llm_analysis_calls"] == 0
+    assert result["llm_skipped_below_threshold"] == 1
+    assert result["outreach_draft_calls"] == 0
+    assert result["outreach_drafts_generated"] == 0
+    # Invariant
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+
+
+def test_qualified_lead_calls_llm_and_generates_draft(tmp_path, monkeypatch):
+    """A qualified candidate must invoke analyze_agency and draft_outreach."""
+    _set_db(tmp_path)
+    _setup_search(["good-agency.com"], monkeypatch)
+
+    analysis_called = {"n": 0}
+    draft_called = {"n": 0}
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "good-agency.com")
+    )
+
+    def track_analysis(company, website, text):
+        analysis_called["n"] += 1
+        return {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        }
+
+    def track_draft(company, fit, proof, angle):
+        draft_called["n"] += 1
+        return ("Subject", "Body")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", track_analysis)
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", track_draft)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["qualified"] == 1
+    assert result["drafted"] == 1
+    assert result["below_score"] == 0
+    assert analysis_called["n"] == 1
+    assert draft_called["n"] == 1
+    assert result["llm_analysis_calls"] == 1
+    assert result["llm_skipped_below_threshold"] == 0
+    assert result["outreach_draft_calls"] == 1
+    assert result["outreach_drafts_generated"] == 1
+
+
+def test_llm_counters_in_summary(tmp_path, monkeypatch):
+    """The summary must include LLM call counters."""
+    _set_db(tmp_path)
+    _setup_search(["good.com", "bad.com"], monkeypatch)
+
+    def fake_crawl(url):
+        if "bad.com" in url:
+            return _make_site(WEAK_TEXT, "bad.com")
+        return _make_site(STRONG_TEXT, "good.com")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fake_crawl)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=2)
+
+    assert "llm_analysis_calls" in result
+    assert "llm_skipped_below_threshold" in result
+    assert "outreach_draft_calls" in result
+    assert "outreach_drafts_generated" in result
+    assert result["llm_analysis_calls"] == 1
+    assert result["llm_skipped_below_threshold"] == 1
+    assert result["outreach_draft_calls"] == 1
+    assert result["outreach_drafts_generated"] == 1
+
+
+# ---------------------------------------------------------------------------
+# R1-5: LLM call counter semantics — attempted vs successful
+# ---------------------------------------------------------------------------
+
+
+def test_llm_analysis_call_counted_even_on_failure(tmp_path, monkeypatch):
+    """If analyze_agency raises, llm_analysis_calls must still be 1
+    (attempted), but outreach_drafts_generated must be 0."""
+    _set_db(tmp_path)
+    _setup_search(["good-agency.com"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "good-agency.com")
+    )
+
+    def failing_analysis(*args, **kwargs):
+        raise RuntimeError("LLM API exploded")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", failing_analysis)
+    monkeypatch.setattr(
+        pipeline_mod,
+        "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["failed"] == 1
+    assert result["processed"] == 0
+    assert result["drafted"] == 0
+    # The attempt was made even though it raised
+    assert result["llm_analysis_calls"] == 1
+    # draft_outreach was never reached
+    assert result["outreach_draft_calls"] == 0
+    assert result["outreach_drafts_generated"] == 0
+
+
+def test_llm_outreach_call_counted_even_on_failure(tmp_path, monkeypatch):
+    """If draft_outreach raises, outreach_draft_calls must be 1 (attempted),
+    but outreach_drafts_generated must be 0."""
+    _set_db(tmp_path)
+    _setup_search(["good-agency.com"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "good-agency.com")
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "s",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+
+    def failing_draft(*args, **kwargs):
+        raise RuntimeError("Outreach generation exploded")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", failing_draft)
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["failed"] == 1
+    assert result["processed"] == 0
+    assert result["drafted"] == 0
+    # Both LLM calls were attempted
+    assert result["llm_analysis_calls"] == 1
+    assert result["outreach_draft_calls"] == 1
+    # But the draft was not successfully generated
+    assert result["outreach_drafts_generated"] == 0
+
+
+# ---------------------------------------------------------------------------
+# R1-3: Rerun state regression tests — protected workflow states
+# ---------------------------------------------------------------------------
+
+
+def _insert_existing_lead(db_path, domain, status, **extra):
+    """Insert a lead with a specific status and extra fields for testing."""
+    from app.db import init_db, now_iso
+    init_db()
+    import sqlite3
+    stamp = now_iso()
+    data = {
+        "company": "Test Co",
+        "domain": domain,
+        "website": f"https://{domain}",
+        "source_query": "q",
+        "source_url": f"https://{domain}",
+        "summary": "old summary",
+        "services": "old services",
+        "score": 80,
+        "score_reasons": "[]",
+        "fit_reason": "old fit",
+        "proof_project": "WingerX",
+        "outreach_angle": "old angle",
+        "contact_email": "founder@old.com",
+        "contact_source": "website",
+        "contact_name": "",
+        "contact_role": "Founder",
+        "contact_quality": "high",
+        "subject": "Old subject",
+        "draft": "Old draft body",
+        "status": status,
+        "gmail_draft_id": "gmail-123",
+        "created_at": stamp,
+        "updated_at": stamp,
+        "last_contact_at": "2026-01-01T00:00:00+00:00",
+        "followup_due_at": "2026-01-05T00:00:00+00:00",
+    }
+    data.update(extra)
+    with sqlite3.connect(str(db_path)) as conn:
+        cols = list(data.keys())
+        vals = list(data.values())
+        q = ",".join("?" for _ in cols)
+        conn.execute(f"INSERT INTO leads ({','.join(cols)}) VALUES ({q})", vals)
+        conn.commit()
+
+
+def _get_lead_row(db_path, domain):
+    import sqlite3
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute("SELECT * FROM leads WHERE domain=?", (domain,)).fetchone()
+
+
+def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
+    """R1-3 Test A / R2-4: A sent lead must not be overwritten by a
+    below-threshold re-qualification run."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(db_path, "example.ai", "sent")
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = run_pipeline(limit=1)
+
+    # The run should succeed — protected lead detected, no LLM
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
+    assert result["llm_analysis_calls"] == 0
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
+
+    row = _get_lead_row(db_path, "example.ai")
+    # Protected fields must be unchanged
+    assert row["status"] == "sent"
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    assert row["gmail_draft_id"] == "gmail-123"
+    assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
+    # Contact state must also be preserved (R2-2)
+    assert row["contact_email"] == "founder@old.com"
+    assert row["contact_source"] == "website"
+    assert row["contact_role"] == "Founder"
+    assert row["contact_quality"] == "high"
+
+
+def test_rerun_drafted_downgraded_clears_stale_state(tmp_path, monkeypatch):
+    """R1-3 Test B: A drafted lead (not protected) that now scores below
+    threshold should be downgraded to rejected-fit and have stale
+    subject/draft/gmail state cleared."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(db_path, "example.ai", "drafted")
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["below_score"] == 1
+
+    row = _get_lead_row(db_path, "example.ai")
+    # drafted is NOT protected — should be downgraded
+    assert row["status"] == "rejected-fit"
+    # Stale generated state must be cleared
+    assert row["subject"] == ""
+    assert row["draft"] == ""
+    assert row["gmail_draft_id"] == ""
+    assert row["contact_email"] == ""
+    assert row["contact_source"] == ""
+    assert row["contact_name"] == ""
+    assert row["contact_role"] == ""
+    assert row["contact_quality"] == ""
+
+
+def test_rerun_approved_lead_preserved(tmp_path, monkeypatch):
+    """R1-3 Test C / R2-4: An approved lead must survive a re-qualification run."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(db_path, "example.ai", "approved")
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
+    assert result["llm_analysis_calls"] == 0
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
+
+    row = _get_lead_row(db_path, "example.ai")
+    assert row["status"] == "approved"
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    assert row["gmail_draft_id"] == "gmail-123"
+    # Contact state preserved (R2-2)
+    assert row["contact_email"] == "founder@old.com"
+    assert row["contact_quality"] == "high"
+
+
+def test_rerun_gmail_drafted_lead_preserved(tmp_path, monkeypatch):
+    """A gmail_drafted lead must also be protected."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(db_path, "example.ai", "gmail_drafted")
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["processed"] == 1
+    assert result["below_score"] == 0  # protected path, not below-score path
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
+
+    row = _get_lead_row(db_path, "example.ai")
+    assert row["status"] == "gmail_drafted"
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    assert row["gmail_draft_id"] == "gmail-123"
+    assert row["contact_email"] == "founder@old.com"
+
+
+# ---------------------------------------------------------------------------
+# R2-5: Explicit workflow transitions must work via update_lead()
+# ---------------------------------------------------------------------------
+
+
+def test_workflow_transition_drafted_to_approved(tmp_path):
+    """R2-5 Test A: drafted -> approved must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "drafted")
+    # Get the lead ID
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    update_lead(lead_id, status="approved")
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "approved"
+
+
+def test_workflow_transition_approved_to_gmail_drafted(tmp_path):
+    """R2-5 Test B: approved -> gmail_drafted must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "approved")
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    update_lead(lead_id, gmail_draft_id="gmail-456", status="gmail_drafted")
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "gmail_drafted"
+    assert updated["gmail_draft_id"] == "gmail-456"
+
+
+def test_workflow_transition_gmail_drafted_to_sent(tmp_path):
+    """R2-5 Test C: gmail_drafted -> sent must work via update_lead()."""
+    from app.db import update_lead, get_lead, init_db
+    db_path = _set_db(tmp_path)
+    init_db()
+    _insert_existing_lead(db_path, "example.ai", "gmail_drafted")
+    row = _get_lead_row(db_path, "example.ai")
+    lead_id = int(row["id"])
+
+    sent_at = "2026-02-01T00:00:00+00:00"
+    followup = "2026-02-08T00:00:00+00:00"
+    update_lead(
+        lead_id,
+        status="sent",
+        last_contact_at=sent_at,
+        followup_due_at=followup,
+    )
+
+    updated = get_lead(lead_id)
+    assert updated["status"] == "sent"
+    assert updated["last_contact_at"] == sent_at
+    assert updated["followup_due_at"] == followup
+    # gmail_draft_id should still be there from the insert
+    assert updated["gmail_draft_id"] == "gmail-123"
+
+
+# ---------------------------------------------------------------------------
+# R2-6: Protected qualified rediscovery skips LLM and draft
+# ---------------------------------------------------------------------------
+
+
+def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypatch):
+    """R2-6: An existing protected lead (sent) that still scores >= 70 must
+    NOT trigger analyze_agency or draft_outreach.  Existing draft/contact/
+    status must remain unchanged."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(
+        db_path, "example.ai", "sent",
+        draft="Human-approved draft",
+        contact_email="founder@example.com",
+        contact_quality="high",
+        score=80,
+    )
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+
+    analysis_called = {"n": 0}
+    draft_called = {"n": 0}
+
+    def fail_if_analysis(*a, **k):
+        analysis_called["n"] += 1
+        raise AssertionError("analyze_agency should NOT be called for protected lead")
+
+    def fail_if_draft(*a, **k):
+        draft_called["n"] += 1
+        raise AssertionError("draft_outreach should NOT be called for protected lead")
+
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", fail_if_analysis)
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fail_if_draft)
+
+    result = run_pipeline(limit=1)
+
+    # Protected lead detected and skipped
+    assert result["attempted"] == 1
+    assert result["processed"] == 1
+    assert result["protected_existing"] == 1
+    assert result["protected_outreach_skipped"] == 1
+    # No LLM calls, no drafts
+    assert result["llm_analysis_calls"] == 0
+    assert result["outreach_draft_calls"] == 0
+    assert result["outreach_drafts_generated"] == 0
+    assert result["drafted"] == 0
+    # Invariant holds
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]
+    # analyze_agency and draft_outreach were NOT called
+    assert analysis_called["n"] == 0
+    assert draft_called["n"] == 0
+
+    row = _get_lead_row(db_path, "example.ai")
+    # All protected fields unchanged
+    assert row["status"] == "sent"
+    assert row["draft"] == "Human-approved draft"
+    assert row["contact_email"] == "founder@example.com"
+    assert row["contact_quality"] == "high"
+    assert row["gmail_draft_id"] == "gmail-123"
+    assert row["subject"] == "Old subject"
+    assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
+
+
+def test_protected_qualified_rediscovery_refreshes_score(tmp_path, monkeypatch):
+    """R2-6: A protected lead's deterministic score/score_reasons MAY refresh
+    even though LLM and draft are skipped."""
+    db_path = _set_db(tmp_path)
+    _insert_existing_lead(
+        db_path, "example.ai", "sent",
+        score=50,
+        score_reasons="[]",
+    )
+    _setup_search(["example.ai"], monkeypatch)
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "draft_outreach",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = run_pipeline(limit=1)
+
+    assert result["protected_existing"] == 1
+    assert result["llm_analysis_calls"] == 0
+
+    row = _get_lead_row(db_path, "example.ai")
+    # Score may refresh
+    assert row["score"] >= 70
+    # But status is still sent
+    assert row["status"] == "sent"
