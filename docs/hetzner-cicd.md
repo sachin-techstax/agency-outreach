@@ -86,7 +86,7 @@ At minimum, real discovery requires:
 SERPER_API_KEY=...
 OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-5.6-luna
-YOUR_NAME=Sachin Rajan
+YOUR_NAME="Sachin Rajan"
 MIN_SCORE=70
 DISCOVERY_LIMIT=15
 FOLLOWUP_DAYS=4
@@ -94,6 +94,8 @@ PACTSIGNAL_DEMO_MODE=false
 ```
 
 OpenAI is optional for the existing deterministic fallback, but the production `doctor --strict` requires Serper because discovery cannot operate without it.
+
+> Do not validate the file by sourcing it directly in Bash. Values may legitimately contain spaces. Docker Compose reads the env file directly; use `pactsignal doctor` or a non-evaluating parser/check instead.
 
 When Gmail drafting is enabled, copy the OAuth files to:
 
