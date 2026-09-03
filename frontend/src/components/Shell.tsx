@@ -2,6 +2,7 @@ import { Activity, LayoutDashboard, LogOut, Radar, Rows3, Send, Sparkles } from 
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+import { signOutOperator } from "../App";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -55,10 +56,7 @@ export function Shell() {
           <button
             className="sidebar-logout"
             type="button"
-            onClick={async () => {
-              await api.logout();
-              window.location.assign("/");
-            }}
+            onClick={signOutOperator}
           >
             <LogOut size={12} />
             Sign out
