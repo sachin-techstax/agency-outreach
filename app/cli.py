@@ -226,7 +226,7 @@ def doctor_cmd(
         try:
             validate_auth_config()
             auth_ok = True
-            auth_detail = f"enabled for {settings.pactsignal_admin_username}"
+            auth_detail = "enabled with static bearer token"
         except RuntimeError as exc:
             auth_ok = False
             auth_detail = str(exc)
@@ -234,7 +234,7 @@ def doctor_cmd(
 
     checks.append(
         (
-            "Operator JWT auth",
+            "Operator API token",
             auth_ok,
             auth_detail,
             auth_required,
@@ -309,7 +309,7 @@ def serve_cmd(
     if not effective_demo and not settings.pactsignal_auth_enabled:
         console.print()
         console.print(
-            "[yellow]Warning: private mode application authentication is disabled. "
+            "[yellow]Warning: private mode API token authentication is disabled. "
             "Do not expose this listener beyond a trusted proxy or localhost.[/yellow]"
         )
 
