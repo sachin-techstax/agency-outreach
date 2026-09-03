@@ -75,9 +75,13 @@ def _frontend_dist() -> Path:
 
 def _require_private_mode(action: str) -> None:
     if settings.pactsignal_demo_mode:
-        raise typer.BadParameter(
-            f"{action} is disabled in PactSignal demo mode."
+        # This is an execution-policy block, not an argument-parse failure.
+        # Print a stable operator-facing reason before exiting so terminal users
+        # and CliRunner/automation receive the same message on stdout.
+        console.print(
+            f"[red]Blocked:[/red] {action} is disabled in PactSignal demo mode."
         )
+        raise typer.Exit(code=2)
 
 
 def _status_counts() -> tuple[list, Counter]:
