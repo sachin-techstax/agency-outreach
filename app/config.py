@@ -40,6 +40,14 @@ class Settings:
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     log_file: str = os.getenv("LOG_FILE", "").strip()
     pactsignal_demo_mode: bool = _bool("PACTSIGNAL_DEMO_MODE", False)
+    pactsignal_auth_enabled: bool = _bool("PACTSIGNAL_AUTH_ENABLED", False)
+    pactsignal_admin_username: str = os.getenv("PACTSIGNAL_ADMIN_USERNAME", "sachin").strip()
+    pactsignal_admin_password_hash: str = os.getenv("PACTSIGNAL_ADMIN_PASSWORD_HASH", "").strip()
+    pactsignal_jwt_secret: str = os.getenv("PACTSIGNAL_JWT_SECRET", "").strip()
+    pactsignal_jwt_ttl_minutes: int = _int("PACTSIGNAL_JWT_TTL_MINUTES", 480)
+    pactsignal_cookie_secure: bool = _bool("PACTSIGNAL_COOKIE_SECURE", True)
+    pactsignal_login_max_failures: int = _int("PACTSIGNAL_LOGIN_MAX_FAILURES", 5)
+    pactsignal_login_window_seconds: int = _int("PACTSIGNAL_LOGIN_WINDOW_SECONDS", 300)
 
 
 settings = Settings()
