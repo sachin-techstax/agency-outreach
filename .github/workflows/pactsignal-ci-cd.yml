@@ -29,6 +29,7 @@ jobs:
           set -Eeuo pipefail
           cp .env.example .env
           mkdir -p data secrets
+          docker network inspect pactsignal_proxy >/dev/null 2>&1 || docker network create pactsignal_proxy >/dev/null
           export LOCAL_UID="$(id -u)"
           export LOCAL_GID="$(id -g)"
           echo "LOCAL_UID=$LOCAL_UID" >> "$GITHUB_ENV"
