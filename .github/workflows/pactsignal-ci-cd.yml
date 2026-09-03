@@ -34,6 +34,14 @@ jobs:
           echo "LOCAL_UID=$LOCAL_UID" >> "$GITHUB_ENV"
           echo "LOCAL_GID=$LOCAL_GID" >> "$GITHUB_ENV"
 
+      - name: Validate deployment scripts and Compose
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n infra/deploy-release.sh
+          bash -n infra/bootstrap-hetzner.sh
+          docker compose config >/dev/null
+
       - name: Build CLI and web images
         shell: bash
         run: |
@@ -70,10 +78,6 @@ jobs:
           echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"PactSignal"'
           echo "$body" | grep -Eq '"demo_mode"[[:space:]]*:[[:space:]]*true'
 
-      - name: Verify demo-mode mutation boundary
-        shell: bash
-        run: |
-          set -Eeuo pipefail
           status="$(curl -sS -o /tmp/demo-block.json -w '%{http_code}' \
             -X POST http://127.0.0.1:8080/api/leads/1/approve)"
           cat /tmp/demo-block.json
