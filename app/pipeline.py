@@ -9,7 +9,13 @@ from .commercial_fit import score_commercial_fit
 from .company_identity import extract_company_name
 from .config import settings
 from .contacts import discover_contact
-from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead_by_domain
+from .db import (
+    is_workflow_state_protected,
+    upsert_lead,
+    update_lead,
+    get_lead_by_domain,
+    get_suppressed_domains,
+)
 from .discovery_priority import DiscoveryPriority, score_discovery_priority
 from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
@@ -335,6 +341,36 @@ def run(limit: int | None = None) -> dict:
 
     candidates, priorities, discovery_stats = _discover_candidates(target)
 
+    # --- suppress existing handled leads AFTER ranking, BEFORE crawl ---
+    # This is DB-aware suppression: domains that already have a lead in a
+    # suppressed status (drafted, approved, gmail_drafted, sent,
+    # do_not_contact) are removed from the attempt pool so they do not
+    # consume fresh attempt slots.  Retryable statuses (rejected-fit,
+    # rejected, discovered, qualified) are NOT suppressed.
+    ranked_domains = list(candidates.keys())
+    suppressed = get_suppressed_domains(ranked_domains)
+    suppressed_by_status: dict[str, int] = {}
+    for domain, status in suppressed.items():
+        suppressed_by_status[status] = suppressed_by_status.get(status, 0) + 1
+        logger.info("Suppressed existing lead %s status=%s", domain, status)
+        # Remove from the attempt pool (candidates is an ordered dict by
+        # descending priority, so remaining domains stay ranked).
+        del candidates[domain]
+        # Clean up priorities side-channel.
+        priorities.pop(domain, None)
+
+    fresh_pool_size = len(candidates)
+    if suppressed:
+        logger.info(
+            "Existing lead suppression: suppressed=%d fresh_retryable_pool=%d",
+            len(suppressed), fresh_pool_size,
+        )
+    if fresh_pool_size == 0 and suppressed:
+        logger.info(
+            "No fresh/retryable candidates remain after existing-lead "
+            "suppression."
+        )
+
     attempted = 0
     processed = 0
     drafted = 0
@@ -514,6 +550,9 @@ def run(limit: int | None = None) -> dict:
         "outreach_drafts_generated": outreach_drafts_generated,
         "protected_existing": protected_existing,
         "protected_outreach_skipped": protected_outreach_skipped,
+        "suppressed_existing": len(suppressed),
+        "suppressed_by_status": suppressed_by_status,
+        "fresh_retryable_pool": fresh_pool_size,
         "duration_s": round(batch_elapsed, 1),
         "failures": failures,
     }
@@ -542,6 +581,23 @@ def _log_summary(summary: dict) -> None:
         f"Eligible candidate domains:  {summary['candidate_domains']}",
         f"Ranked candidate domains:    {summary['ranked_candidate_domains']}",
         f"Candidate priority avg:      {summary['candidate_priority_avg']}",
+        "",
+        "Existing lead suppression",
+        "-------------------------",
+        f"Suppressed total:        {summary['suppressed_existing']}",
+    ]
+    by_status = summary.get("suppressed_by_status") or {}
+    status_labels = [
+        ("drafted", "Drafted"),
+        ("approved", "Approved"),
+        ("gmail_drafted", "Gmail drafted"),
+        ("sent", "Sent"),
+        ("do_not_contact", "Do not contact"),
+    ]
+    for key, label in status_labels:
+        lines.append(f"{label + ':':24s} {by_status.get(key, 0)}")
+    lines.append(f"Fresh/retryable pool:   {summary['fresh_retryable_pool']}")
+    lines += [
         "",
         "Attempts",
         "--------",

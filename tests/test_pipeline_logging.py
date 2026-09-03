@@ -1238,15 +1238,17 @@ def _get_lead_row(db_path, domain):
 
 
 def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
-    """R1-3 Test A / R2-4: A sent lead must not be overwritten by a
-    below-threshold re-qualification run."""
+    """R1-3 Test A / R2-4: A sent lead must be suppressed before crawl and
+    its DB row must remain completely unchanged."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "sent")
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
-    )
+    # crawl_company must NOT be called for a suppressed lead
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed sent lead")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
     monkeypatch.setattr(
         pipeline_mod, "analyze_agency",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
@@ -1254,23 +1256,20 @@ def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
 
     result = run_pipeline(limit=1)
 
-    # The run should succeed — protected lead detected, no LLM
-    assert result["attempted"] == 1
-    assert result["processed"] == 1
-    assert result["below_score"] == 0  # protected path, not below-score path
+    # Suppressed before crawl — no attempt slot consumed
+    assert result["attempted"] == 0
+    assert result["processed"] == 0
+    assert result["suppressed_existing"] == 1
     assert result["llm_analysis_calls"] == 0
-    assert result["protected_existing"] == 1
-    assert result["protected_outreach_skipped"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
-    # Protected fields must be unchanged
+    # All fields must be unchanged — no crawl, no DB mutation
     assert row["status"] == "sent"
     assert row["subject"] == "Old subject"
     assert row["draft"] == "Old draft body"
     assert row["gmail_draft_id"] == "gmail-123"
     assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
     assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
-    # Contact state must also be preserved (R2-2)
     assert row["contact_email"] == "founder@old.com"
     assert row["contact_source"] == "website"
     assert row["contact_role"] == "Founder"
@@ -1278,45 +1277,42 @@ def test_rerun_sent_lead_preserved(tmp_path, monkeypatch):
 
 
 def test_rerun_drafted_downgraded_clears_stale_state(tmp_path, monkeypatch):
-    """R1-3 Test B: A drafted lead (not protected) that now scores below
-    threshold should be downgraded to rejected-fit and have stale
-    subject/draft/gmail state cleared."""
+    """A drafted lead is now SUPPRESSED from normal discovery (not crawled
+    and downgraded).  The DB row must remain unchanged.  Downgrade happens
+    only via explicit requalification workflows, not normal discovery."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "drafted")
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
-    )
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed drafted lead")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
 
     result = run_pipeline(limit=1)
 
-    assert result["attempted"] == 1
-    assert result["below_score"] == 1
+    # Drafted is suppressed — no attempt, no crawl, no downgrade
+    assert result["attempted"] == 0
+    assert result["suppressed_existing"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
-    # drafted is NOT protected — should be downgraded
-    assert row["status"] == "rejected-fit"
-    # Stale generated state must be cleared
-    assert row["subject"] == ""
-    assert row["draft"] == ""
-    assert row["gmail_draft_id"] == ""
-    assert row["contact_email"] == ""
-    assert row["contact_source"] == ""
-    assert row["contact_name"] == ""
-    assert row["contact_role"] == ""
-    assert row["contact_quality"] == ""
+    # DB row unchanged — drafted status preserved, stale state NOT cleared
+    # by normal discovery (only by explicit requalification)
+    assert row["status"] == "drafted"
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
 
 
 def test_rerun_approved_lead_preserved(tmp_path, monkeypatch):
-    """R1-3 Test C / R2-4: An approved lead must survive a re-qualification run."""
+    """An approved lead must be suppressed before crawl and preserved."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "approved")
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
-    )
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed approved lead")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
     monkeypatch.setattr(
         pipeline_mod, "analyze_agency",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
@@ -1324,39 +1320,34 @@ def test_rerun_approved_lead_preserved(tmp_path, monkeypatch):
 
     result = run_pipeline(limit=1)
 
-    assert result["attempted"] == 1
-    assert result["processed"] == 1
-    assert result["below_score"] == 0  # protected path, not below-score path
+    assert result["attempted"] == 0
+    assert result["suppressed_existing"] == 1
     assert result["llm_analysis_calls"] == 0
-    assert result["protected_existing"] == 1
-    assert result["protected_outreach_skipped"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
     assert row["status"] == "approved"
     assert row["subject"] == "Old subject"
     assert row["draft"] == "Old draft body"
     assert row["gmail_draft_id"] == "gmail-123"
-    # Contact state preserved (R2-2)
     assert row["contact_email"] == "founder@old.com"
     assert row["contact_quality"] == "high"
 
 
 def test_rerun_gmail_drafted_lead_preserved(tmp_path, monkeypatch):
-    """A gmail_drafted lead must also be protected."""
+    """A gmail_drafted lead must be suppressed before crawl and preserved."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(db_path, "example.ai", "gmail_drafted")
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(WEAK_TEXT, "example.ai")
-    )
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed gmail_drafted lead")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
 
     result = run_pipeline(limit=1)
 
-    assert result["processed"] == 1
-    assert result["below_score"] == 0  # protected path, not below-score path
-    assert result["protected_existing"] == 1
-    assert result["protected_outreach_skipped"] == 1
+    assert result["attempted"] == 0
+    assert result["suppressed_existing"] == 1
 
     row = _get_lead_row(db_path, "example.ai")
     assert row["status"] == "gmail_drafted"
@@ -1435,8 +1426,8 @@ def test_workflow_transition_gmail_drafted_to_sent(tmp_path):
 
 
 def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypatch):
-    """R2-6: An existing protected lead (sent) that still scores >= 70 must
-    NOT trigger analyze_agency or draft_outreach.  Existing draft/contact/
+    """R2-6: An existing protected lead (sent) is now SUPPRESSED before crawl.
+    No crawl, no LLM, no draft, no DB mutation.  Existing draft/contact/
     status must remain unchanged."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(
@@ -1448,32 +1439,29 @@ def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypat
     )
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
-    )
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed sent lead")
 
     analysis_called = {"n": 0}
     draft_called = {"n": 0}
 
     def fail_if_analysis(*a, **k):
         analysis_called["n"] += 1
-        raise AssertionError("analyze_agency should NOT be called for protected lead")
+        raise AssertionError("analyze_agency should NOT be called for suppressed lead")
 
     def fail_if_draft(*a, **k):
         draft_called["n"] += 1
-        raise AssertionError("draft_outreach should NOT be called for protected lead")
+        raise AssertionError("draft_outreach should NOT be called for suppressed lead")
 
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
     monkeypatch.setattr(pipeline_mod, "analyze_agency", fail_if_analysis)
     monkeypatch.setattr(pipeline_mod, "draft_outreach", fail_if_draft)
 
     result = run_pipeline(limit=1)
 
-    # Protected lead detected and skipped
-    assert result["attempted"] == 1
-    assert result["processed"] == 1
-    assert result["protected_existing"] == 1
-    assert result["protected_outreach_skipped"] == 1
-    # No LLM calls, no drafts
+    # Suppressed before crawl — no attempt slot consumed
+    assert result["attempted"] == 0
+    assert result["suppressed_existing"] == 1
     assert result["llm_analysis_calls"] == 0
     assert result["outreach_draft_calls"] == 0
     assert result["outreach_drafts_generated"] == 0
@@ -1485,7 +1473,7 @@ def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypat
     assert draft_called["n"] == 0
 
     row = _get_lead_row(db_path, "example.ai")
-    # All protected fields unchanged
+    # All fields unchanged — no crawl, no DB mutation
     assert row["status"] == "sent"
     assert row["draft"] == "Human-approved draft"
     assert row["contact_email"] == "founder@example.com"
@@ -1494,11 +1482,14 @@ def test_protected_qualified_rediscovery_skips_llm_and_draft(tmp_path, monkeypat
     assert row["subject"] == "Old subject"
     assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
     assert row["followup_due_at"] == "2026-01-05T00:00:00+00:00"
+    # Score NOT refreshed (no crawl happened)
+    assert row["score"] == 80
 
 
 def test_protected_qualified_rediscovery_refreshes_score(tmp_path, monkeypatch):
-    """R2-6: A protected lead's deterministic score/score_reasons MAY refresh
-    even though LLM and draft are skipped."""
+    """R2-6: A protected (sent) lead is now suppressed before crawl, so its
+    score is NOT refreshed either (no crawl = no new score).  The DB row
+    remains completely unchanged."""
     db_path = _set_db(tmp_path)
     _insert_existing_lead(
         db_path, "example.ai", "sent",
@@ -1507,9 +1498,10 @@ def test_protected_qualified_rediscovery_refreshes_score(tmp_path, monkeypatch):
     )
     _setup_search(["example.ai"], monkeypatch)
 
-    monkeypatch.setattr(
-        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "example.ai")
-    )
+    def fail_if_crawl(*a, **k):
+        raise AssertionError("crawl_company should NOT be called for suppressed sent lead")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", fail_if_crawl)
     monkeypatch.setattr(
         pipeline_mod, "analyze_agency",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")),
@@ -1521,11 +1513,10 @@ def test_protected_qualified_rediscovery_refreshes_score(tmp_path, monkeypatch):
 
     result = run_pipeline(limit=1)
 
-    assert result["protected_existing"] == 1
+    assert result["suppressed_existing"] == 1
     assert result["llm_analysis_calls"] == 0
 
     row = _get_lead_row(db_path, "example.ai")
-    # Score may refresh
-    assert row["score"] >= 70
-    # But status is still sent
+    # Score NOT refreshed (no crawl happened)
+    assert row["score"] == 50
     assert row["status"] == "sent"

@@ -23,6 +23,44 @@ PROTECTED_STATUSES = frozenset({
     "sent",
 })
 
+# ---------------------------------------------------------------------------
+# Discovery suppression policy
+# ---------------------------------------------------------------------------
+# Statuses that cause a domain to be SUPPRESSED from normal discovery runs
+# (before crawl).  These leads are already in an outreach workflow and should
+# not consume fresh attempt slots.
+#
+# Suppressed statuses:
+#   drafted        - already has outreach prepared; do not regenerate
+#   approved       - human approved; do not rediscover/regenerate
+#   gmail_drafted  - Gmail draft exists; do not rediscover/regenerate
+#   sent           - already contacted; never consume a fresh attempt slot
+#   do_not_contact - permanently suppress from normal outreach discovery
+#
+# NOT suppressed (retryable):
+#   rejected-fit   - website/services may change; may become viable later
+#   rejected       - manually rejected but may be reconsidered
+#   discovered     - non-terminal research state; retryable
+#   qualified      - retryable unless there is already a usable draft (which
+#                    would mean status=drafted, which IS suppressed)
+#
+# Note: workflow mutation protection (PROTECTED_STATUSES) and discovery
+# suppression (SUPPRESSED_STATUSES) are intentionally separate concepts.
+# `drafted` is suppressed from discovery but NOT protected from repository
+# mutation, because explicit requalification workflows may need to update it.
+SUPPRESSED_STATUSES = frozenset({
+    "drafted",
+    "approved",
+    "gmail_drafted",
+    "sent",
+    "do_not_contact",
+})
+
+# Reverse mapping for allow-contact: which status to restore to when clearing
+# a do_not_contact flag.  We restore to "rejected" (a retryable status) so the
+# domain can be rediscovered on a future normal run.
+_DNC_RESTORE_STATUS = "rejected"
+
 # Fields that must never be overwritten by an automated upsert when the
 # existing lead is in a protected status.  This includes both workflow state
 # and the contact information used by the human workflow.
@@ -62,6 +100,17 @@ def is_workflow_state_protected(status: str | None) -> bool:
     that automated discovery must not overwrite.
     """
     return status in PROTECTED_STATUSES
+
+
+def is_suppressed_status(status: str | None) -> bool:
+    """Return True if an existing lead with *status* should be suppressed
+    from normal discovery runs (before crawl).
+
+    Suppressed statuses are listed in :data:`SUPPRESSED_STATUSES`.  Leads in
+    retryable statuses (rejected-fit, rejected, discovered, qualified) are
+    NOT suppressed and may be rediscovered.
+    """
+    return status in SUPPRESSED_STATUSES
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -277,3 +326,61 @@ def due_followups(now: str):
                ORDER BY followup_due_at ASC""",
             (now,),
         ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Bulk discovery suppression lookup
+# ---------------------------------------------------------------------------
+
+# SQLite default limit for the number of host parameters in a single statement
+# is 999 (or 32766 in newer versions).  Our discovery pools are small (<200),
+# so a single IN-clause query is safe.  We chunk defensively anyway in case a
+# future pool grows large.
+_SQLITE_PARAM_LIMIT = 500
+
+
+def get_lead_statuses_by_domains(domains: Iterable[str]) -> dict[str, str]:
+    """Bulk-lookup the current status of existing leads for *domains*.
+
+    Returns a dict mapping canonical domain -> status for every domain that
+    has an existing lead row.  Domains with no existing lead are absent from
+    the result.  Uses a single SQL query per chunk (``SELECT domain, status
+    FROM leads WHERE domain IN (...)``) so suppression checks do not issue
+    one query per candidate.
+
+    Domains are matched exactly as stored (canonical, without ``www.``).
+    Callers must normalize domains before passing them in (use
+    :func:`app.candidate_filter.normalize_domain`).
+    """
+    domains = list(domains)
+    if not domains:
+        return {}
+    init_db()
+    result: dict[str, str] = {}
+    with conn() as db:
+        for i in range(0, len(domains), _SQLITE_PARAM_LIMIT):
+            chunk = domains[i:i + _SQLITE_PARAM_LIMIT]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = db.execute(
+                f"SELECT domain, status FROM leads WHERE domain IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                result[row["domain"]] = row["status"]
+    return result
+
+
+def get_suppressed_domains(domains: Iterable[str]) -> dict[str, str]:
+    """Return ``{domain: status}`` for domains whose existing lead status is
+    a suppressed status (see :data:`SUPPRESSED_STATUSES`).
+
+    This is the primary bulk lookup used by the pipeline to suppress
+    already-handled leads before crawl.  Domains with no existing lead or
+    with a retryable status are absent from the result.
+    """
+    statuses = get_lead_statuses_by_domains(domains)
+    return {
+        domain: status
+        for domain, status in statuses.items()
+        if is_suppressed_status(status)
+    }
