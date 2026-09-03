@@ -110,3 +110,26 @@ def test_health_reports_product_name():
     response = client.get("/api/health")
     assert response.status_code == 200
     assert response.json()["product"] == "PactSignal"
+
+
+def test_private_leads_initializes_fresh_database(tmp_path: Path):
+    object.__setattr__(settings, "pactsignal_demo_mode", False)
+    object.__setattr__(settings, "db_path", tmp_path / "fresh.db")
+
+    client = TestClient(api_mod.app)
+    response = client.get("/api/leads")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "total": 0}
+
+
+def test_demo_leads_total_is_before_limit():
+    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    client = TestClient(api_mod.app)
+
+    response = client.get("/api/leads?limit=2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 2
+    assert body["total"] == len(api_mod.DEMO_LEADS)

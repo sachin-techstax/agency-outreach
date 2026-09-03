@@ -1,8 +1,12 @@
-# Agency Outreach V1
+# PactSignal
 
-A human-approved pipeline for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
+**Partner intelligence & outreach.**
 
-The system intentionally **does not auto-send cold email**. It discovers agencies, scores them, drafts short personalized outreach, lets you approve or reject leads, and can create Gmail drafts for approved leads.
+PactSignal is a human-approved partner discovery and outreach platform for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
+
+It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. PactSignal intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
+
+The repository name and SQLite filename still use the original `agency-outreach` identifier for migration stability. PactSignal is the product name.
 
 ## What it does
 
@@ -25,6 +29,79 @@ The system intentionally **does not auto-send cold email**. It discovers agencie
 - **Forge Crew** → multi-agent engineering/orchestration
 
 Edit `PORTFOLIO` in `app/llm.py` if you want different wording.
+
+# PactSignal operator console
+
+The React + FastAPI operator console is implemented as a separate web runtime. It uses the same SQLite database and existing pipeline primitives as the CLI.
+
+Core screens:
+
+- **Overview** — pipeline metrics, priority review queue, latest run
+- **Leads** — dense searchable/filterable lead records with preview
+- **Lead Review** — properties, agency intelligence, selected portfolio proof, outreach draft, and human approval actions
+
+The current visual direction is a bright, record-first **Twenty × Attio** style rather than a generic admin dashboard.
+
+## Demo mode
+
+For portfolio/screenshare use, enable:
+
+```env
+PACTSIGNAL_DEMO_MODE=true
+```
+
+Demo mode serves fictional `.demo` agencies and is intentionally read-only. It blocks:
+
+- pipeline runs
+- status mutations
+- Gmail draft creation
+- sent-state mutation
+- any other persistent/external action exposed by the operator API
+
+This makes it safe to show PactSignal publicly without exposing prospect data or triggering real outreach.
+
+## Run the web UI
+
+Build and start only the PactSignal web service:
+
+```bash
+docker compose build pactsignal-web
+docker compose up pactsignal-web
+```
+
+Then open:
+
+```text
+http://localhost:8080
+```
+
+Health check:
+
+```bash
+curl http://localhost:8080/api/health
+```
+
+Expected product field:
+
+```json
+{"ok":true,"product":"PactSignal"}
+```
+
+For frontend-only development:
+
+```bash
+# terminal 1
+uvicorn app.api:app --host 127.0.0.1 --port 8080 --reload
+
+# terminal 2
+cd frontend
+npm install
+npm run dev
+```
+
+Vite runs on `http://localhost:5173` and proxies `/api` to FastAPI on port 8080.
+
+> Private mode currently assumes network-level protection. Do not expose a private-mode PactSignal instance directly to the public internet until authentication is added. Demo mode is the safe public/portfolio mode.
 
 # Docker quick start
 

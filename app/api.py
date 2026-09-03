@@ -81,6 +81,7 @@ def _demo_lead(lead_id: int) -> dict:
 
 
 def _live_lead(lead_id: int) -> dict:
+    init_db()
     row = get_lead(lead_id)
     if not row:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -179,9 +180,11 @@ def leads(
                 or query in lead["domain"].lower()
                 or query in (lead.get("proof_project") or "").lower()
             ]
+        total = len(items)
         items = items[:limit]
-        return {"items": [_serialize_lead(item) for item in items], "total": len(items)}
+        return {"items": [_serialize_lead(item) for item in items], "total": total}
 
+    init_db()
     rows = [_serialize_lead(r) for r in list_leads(status=status, min_score=min_score, limit=5000)]
     if query:
         rows = [
