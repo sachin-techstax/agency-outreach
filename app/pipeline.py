@@ -10,13 +10,20 @@ from .company_identity import extract_company_name
 from .config import settings
 from .contacts import discover_contact
 from .db import is_workflow_state_protected, upsert_lead, update_lead, get_lead_by_domain
+from .discovery_priority import DiscoveryPriority, score_discovery_priority
 from .llm import analyze_agency, draft_outreach
 from .logging_config import get_logger
 from .scrape import crawl_company, domain_of, root_url
-from .search import DEFAULT_QUERIES, search_serper
+from .search import (
+    DEFAULT_QUERY_SPECS,
+    SearchHit,
+    ordered_query_specs,
+    search_serper,
+)
 
 logger = get_logger("pipeline")
 qual_logger = get_logger("qualification")
+discovery_logger = get_logger("discovery")
 
 
 def _classify_failure(exc: Exception) -> str:
@@ -38,68 +45,201 @@ def _classify_failure(exc: Exception) -> str:
     return name
 
 
-def _discover_candidates(target: int) -> tuple[dict, dict]:
+def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
     """Run discovery searches, filter candidates, and return eligible domains.
 
-    Returns a tuple of ``(candidates, discovery_stats)`` where *candidates* maps
-    eligible domain strings to their first accepted :class:`SearchHit` and
-    *discovery_stats* contains ``raw_candidate_domains``,
-    ``rejected_candidate_domains``, and ``candidate_domains`` counts.
+    Returns a tuple of ``(candidates, priorities, discovery_stats)`` where:
+
+    - *candidates* maps eligible domain strings to the BEST accepted
+      :class:`SearchHit` for that domain (highest discovery priority, with
+      deterministic tie-breaking), ordered by descending discovery priority.
+    - *priorities* maps each eligible domain to its
+      :class:`DiscoveryPriority`.
+    - *discovery_stats* contains per-run counts plus per-query observability.
+
+    Strategy (V1 simplicity, bounded Serper cost):
+
+    1. Run ALL configured :class:`QuerySpec` (ordered by descending priority).
+       We do not stop early just because the first queries produced
+       ``target * 3`` eligible domains -- later query categories may surface
+       stronger prospects.  Serper call count is bounded by the spec count.
+    2. For each result: normalize domain, run :func:`evaluate_candidate`.
+    3. For each accepted hit, score it with
+       :func:`score_discovery_priority` and keep the BEST hit per domain
+       (so ``/services/ai-agent-development`` beats ``/blog/ai-trends``).
+    4. Rank the final eligible pool by descending discovery priority with
+       deterministic tie-breaking (query rank, then result rank).
 
     Raises ``RuntimeError`` if every configured search query fails.  A
     successful search that returns zero organic results is not treated as a
     failure.  If all results are rejected by candidate filtering, an empty
     candidates dict is returned (this is NOT a search failure).
     """
-    candidates: dict[str, object] = {}
+    specs = ordered_query_specs(DEFAULT_QUERY_SPECS)
+
+    # best_hit[domain] = (priority, hit); we keep the highest-priority hit.
+    best_hit: dict[str, tuple[DiscoveryPriority, SearchHit]] = {}
     raw_domains: set[str] = set()
+    # Track rejected domains that never produced an accepted hit, for stats.
+    rejected_only: set[str] = set()
+    # Per-domain best accepted priority (for stats/observability).
+    domain_priority: dict[str, DiscoveryPriority] = {}
+
     search_attempts = 0
     search_success = 0
     search_failed = 0
+    search_results_total = 0
+    per_query: list[dict] = []
 
-    for query in DEFAULT_QUERIES:
+    for qrank, spec in enumerate(specs):
+        query = spec.build_query()
         search_attempts += 1
+        query_unique: set[str] = set()
+        query_accepted = 0
+        query_rejected = 0
         try:
             hits = search_serper(query, num=10)
         except Exception as exc:
             search_failed += 1
             logger.error("Search failed for query %r: %s", query, exc)
+            per_query.append({
+                "query_rank": qrank,
+                "category": spec.category,
+                "query": spec.query,
+                "results": 0,
+                "unique": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "selected": 0,
+                "failed": True,
+            })
             continue
         search_success += 1
+        search_results_total += len(hits)
+
         for hit in hits:
+            # Stamp provenance metadata onto the hit object.  Use the
+            # human-readable base QuerySpec query (not the expanded -site
+            # string) so source_query provenance stays readable.
+            hit.query = spec.query
+            hit.query_category = spec.category
+            hit.query_rank = qrank
+
             domain = normalize_domain(hit.url)
             if not domain:
                 continue
+            query_unique.add(domain)
             raw_domains.add(domain)
-            if domain in candidates:
-                continue
+
             decision = evaluate_candidate(hit)
             if not decision.accepted:
+                query_rejected += 1
                 logger.debug("Rejected %s: %s", domain, decision.reason)
+                # Mark as rejected-only unless a later/earlier hit accepted it.
+                if domain not in best_hit:
+                    rejected_only.add(domain)
                 continue
-            candidates[domain] = hit
-            if len(candidates) >= target * 3:
-                break
-        if len(candidates) >= target * 3:
-            break
 
-    rejected_domains = raw_domains - set(candidates.keys())
+            # Accepted: score and consider for best-hit-per-domain.
+            query_accepted += 1
+            rejected_only.discard(domain)
+            priority = score_discovery_priority(hit)
+            logger.debug(
+                "Ranked %s priority=%d reasons=%s",
+                domain, priority.score, ",".join(priority.reasons) or "-",
+            )
+            existing = best_hit.get(domain)
+            if existing is None or _is_better_hit(priority, hit, existing[0], existing[1]):
+                best_hit[domain] = (priority, hit)
+                domain_priority[domain] = priority
 
-    logger.info(
+        per_query.append({
+            "query_rank": qrank,
+            "category": spec.category,
+            "query": spec.query,
+            "results": len(hits),
+            "unique": len(query_unique),
+            "accepted": query_accepted,
+            "rejected": query_rejected,
+            "selected": 0,  # filled after ranking
+            "failed": False,
+        })
+        discovery_logger.info(
+            "Query %s: results=%d unique=%d accepted=%d rejected=%d",
+            spec.category,
+            len(hits),
+            len(query_unique),
+            query_accepted,
+            query_rejected,
+        )
+
+    # --- rank the eligible pool deterministically ---
+    ranked = sorted(
+        best_hit.items(),
+        key=lambda item: (
+            -item[1][0].score,        # discovery priority descending
+            item[1][1].query_rank,    # earlier query wins
+            item[1][1].result_rank,   # earlier Serper position wins
+            item[0],                  # domain name final tie-break
+        ),
+    )
+    candidates: dict[str, SearchHit] = {}
+    candidates_priority: dict[str, DiscoveryPriority] = {}
+    for domain, (priority, hit) in ranked:
+        candidates[domain] = hit
+        candidates_priority[domain] = priority
+
+    # Fill in "selected" counts per query.  Track by query_rank (the stable
+    # identity of each individual QuerySpec) -- NOT by category, because
+    # multiple QuerySpecs share categories (e.g. two "automation" specs).
+    selected_by_rank: dict[int, int] = {}
+    for hit in candidates.values():
+        selected_by_rank[hit.query_rank] = selected_by_rank.get(hit.query_rank, 0) + 1
+    for q in per_query:
+        q["selected"] = selected_by_rank.get(q["query_rank"], 0)
+
+    rejected_domains = rejected_only
+    eligible_count = len(candidates)
+
+    # Discovery summary observability.
+    discovery_logger.info(
         "Discovery searches: attempted=%d success=%d failed=%d",
-        search_attempts,
-        search_success,
-        search_failed,
+        search_attempts, search_success, search_failed,
+    )
+    discovery_logger.info(
+        "Discovery pool: raw_unique=%d rejected=%d eligible=%d ranked=%d",
+        len(raw_domains), len(rejected_domains), eligible_count, eligible_count,
     )
     if search_success == 0 and search_attempts > 0:
         raise RuntimeError(
             f"Agency discovery failed: all {search_attempts} Serper searches failed."
         )
 
+    # Per-query summary block.
+    summary_lines = [
+        "Discovery queries",
+        "-----------------",
+        f"Queries attempted: {search_attempts}",
+        f"Queries succeeded: {search_success}",
+        f"Raw unique domains: {len(raw_domains)}",
+        f"Eligible domains: {eligible_count}",
+        f"Ranked pool: {eligible_count}",
+    ]
+    discovery_logger.info("\n".join(summary_lines))
+
+    avg_priority = (
+        round(sum(p.score for p in candidates_priority.values()) / eligible_count, 1)
+        if eligible_count else 0.0
+    )
     stats = {
         "raw_candidate_domains": len(raw_domains),
         "rejected_candidate_domains": len(rejected_domains),
-        "candidate_domains": len(candidates),
+        "candidate_domains": eligible_count,
+        "ranked_candidate_domains": eligible_count,
+        "query_count": search_attempts,
+        "search_results_total": search_results_total,
+        "candidate_priority_avg": avg_priority,
+        "per_query": per_query,
     }
     logger.info(
         "Discovery filtering: raw_domains=%d rejected=%d eligible=%d",
@@ -107,14 +247,85 @@ def _discover_candidates(target: int) -> tuple[dict, dict]:
         stats["rejected_candidate_domains"],
         stats["candidate_domains"],
     )
-    if search_success > 0 and len(candidates) == 0:
+    if search_success > 0 and eligible_count == 0:
         logger.info(
             "Search completed successfully, but no eligible agency candidates "
             "remained after filtering."
         )
     else:
-        logger.info("Discovered %d eligible candidate domains", len(candidates))
-    return candidates, stats
+        logger.info("Discovered %d eligible candidate domains", eligible_count)
+    return candidates, candidates_priority, stats
+
+
+def _is_better_hit(
+    new_priority: DiscoveryPriority,
+    new_hit: SearchHit,
+    old_priority: DiscoveryPriority,
+    old_hit: SearchHit,
+) -> bool:
+    """Return True if *new_hit* should replace *old_hit* for a domain.
+
+    Tie-breaking: higher priority, then earlier query rank, then earlier
+    Serper result rank.
+    """
+    if new_priority.score != old_priority.score:
+        return new_priority.score > old_priority.score
+    if new_hit.query_rank != old_hit.query_rank:
+        return new_hit.query_rank < old_hit.query_rank
+    return new_hit.result_rank < old_hit.result_rank
+
+
+def discover_only(limit: int | None = None) -> dict:
+    """Run discovery only (Serper + filter + dedupe + priority ranking).
+
+    Read-only with respect to leads: no crawl, no OpenAI, no contact
+    discovery, no Gmail, no DB writes.  Returns a summary dict with the
+    full ranked pool metrics and per-query observability, plus a
+    ``ranked`` list containing only the top ``limit`` rows for display.
+
+    The full bounded discovery pool is always built and ranked; ``limit``
+    only truncates the displayed/output rows, not the pool itself.
+
+    Returned metrics:
+      - ``candidate_domains``: total eligible domains in the full pool
+      - ``ranked_candidate_domains``: total ranked domains in the full pool
+      - ``displayed_candidate_domains``: min(limit, ranked_candidate_domains)
+      - ``ranked``: top ``limit`` rows only
+    """
+    target = limit or settings.discovery_limit
+    logger.info("Starting discovery-only run. Pool target: %d", target)
+    candidates, priorities, stats = _discover_candidates(target)
+
+    full_pool_size = len(candidates)
+    display_n = min(target, full_pool_size)
+
+    ranked_rows: list[dict] = []
+    for rank, (domain, hit) in enumerate(candidates.items(), start=1):
+        if rank > display_n:
+            break
+        prio = priorities.get(domain)
+        ranked_rows.append({
+            "rank": rank,
+            "domain": domain,
+            "priority": prio.score if prio else 0,
+            "reasons": ",".join(prio.reasons) if prio else "",
+            "category": hit.query_category,
+            "source_query": hit.query,
+            "title": hit.title,
+            "url": hit.url,
+        })
+    return {
+        "query_count": stats["query_count"],
+        "search_results_total": stats["search_results_total"],
+        "raw_candidate_domains": stats["raw_candidate_domains"],
+        "rejected_candidate_domains": stats["rejected_candidate_domains"],
+        "candidate_domains": stats["candidate_domains"],
+        "ranked_candidate_domains": stats["ranked_candidate_domains"],
+        "displayed_candidate_domains": display_n,
+        "candidate_priority_avg": stats["candidate_priority_avg"],
+        "per_query": stats["per_query"],
+        "ranked": ranked_rows,
+    }
 
 
 def run(limit: int | None = None) -> dict:
@@ -122,7 +333,7 @@ def run(limit: int | None = None) -> dict:
     batch_start = time.perf_counter()
     logger.info("Starting agency discovery. Target: %d", target)
 
-    candidates, discovery_stats = _discover_candidates(target)
+    candidates, priorities, discovery_stats = _discover_candidates(target)
 
     attempted = 0
     processed = 0
@@ -146,7 +357,14 @@ def run(limit: int | None = None) -> dict:
         if attempted >= target:
             break
         attempted += 1
-        logger.info("Processing agency %d/%d: %s", attempted, target, domain)
+        dprio = priorities.get(domain)
+        if dprio is not None:
+            logger.info(
+                "Processing agency %d/%d: %s discovery_priority=%d",
+                attempted, target, domain, dprio.score,
+            )
+        else:
+            logger.info("Processing agency %d/%d: %s", attempted, target, domain)
         site_start = time.perf_counter()
         try:
             site = crawl_company(hit.url)
@@ -281,6 +499,10 @@ def run(limit: int | None = None) -> dict:
         "candidate_domains": discovery_stats["candidate_domains"],
         "raw_candidate_domains": discovery_stats["raw_candidate_domains"],
         "rejected_candidate_domains": discovery_stats["rejected_candidate_domains"],
+        "ranked_candidate_domains": discovery_stats["ranked_candidate_domains"],
+        "query_count": discovery_stats["query_count"],
+        "search_results_total": discovery_stats["search_results_total"],
+        "candidate_priority_avg": discovery_stats["candidate_priority_avg"],
         "qualified": qualified,
         "skipped": skipped,
         "failed": failed,
@@ -313,9 +535,13 @@ def _log_summary(summary: dict) -> None:
         "--------------",
         "Discovery",
         "---------",
+        f"Queries executed:           {summary['query_count']}",
+        f"Search results total:        {summary['search_results_total']}",
         f"Raw candidate domains:      {summary['raw_candidate_domains']}",
         f"Rejected before crawl:       {summary['rejected_candidate_domains']}",
         f"Eligible candidate domains:  {summary['candidate_domains']}",
+        f"Ranked candidate domains:    {summary['ranked_candidate_domains']}",
+        f"Candidate priority avg:      {summary['candidate_priority_avg']}",
         "",
         "Attempts",
         "--------",

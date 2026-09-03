@@ -37,6 +37,7 @@ _MANAGED_LOGGERS = (
     "db",
     "cli",
     "gmail",
+    "discovery",
 )
 
 

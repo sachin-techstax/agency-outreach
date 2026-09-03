@@ -14,7 +14,7 @@ from .db import due_followups, get_lead, init_db, list_leads, now_iso, update_le
 from .gmail_client import create_draft
 from .llm import draft_followup
 from .logging_config import configure_logging, get_logger
-from .pipeline import run as run_pipeline
+from .pipeline import discover_only, run as run_pipeline
 
 app = typer.Typer(help="Human-approved agency outreach pipeline")
 console = Console()
@@ -76,6 +76,77 @@ def run_cmd(
     _startup_banner(effective_limit, effective_log_level)
     result = run_pipeline(effective_limit)
     console.print(result)
+
+
+@app.command("discover")
+def discover_cmd(
+    limit: int = typer.Option(20, help="Max discovery pool size to rank and display"),
+    verbose: bool = typer.Option(False, "--verbose", help="Enable DEBUG logging for this run"),
+):
+    """Discovery-only: Serper + candidate filter + dedupe + priority ranking.
+
+    Read-only with respect to leads.  No crawling, no OpenAI, no contact
+    discovery, no Gmail, no DB writes.  Useful for tuning discovery without
+    spending LLM tokens.
+    """
+    effective_log_level = "DEBUG" if verbose else settings.log_level
+    if verbose:
+        configure_logging(level=logging.DEBUG)
+    if not settings.serper_api_key:
+        raise typer.BadParameter(
+            "SERPER_API_KEY is missing. Add it to .env before running discovery."
+        )
+    console.print("Agency Outreach — discovery-only")
+    console.print(f"Pool limit: {limit}")
+    console.print(f"Log level:  {effective_log_level}")
+    result = discover_only(limit)
+
+    console.print()
+    console.print("Discovery summary")
+    console.print("-----------------")
+    console.print(f"Queries executed:           {result['query_count']}")
+    console.print(f"Search results total:        {result['search_results_total']}")
+    console.print(f"Raw candidate domains:       {result['raw_candidate_domains']}")
+    console.print(f"Rejected before crawl:       {result['rejected_candidate_domains']}")
+    console.print(f"Eligible candidate domains:  {result['candidate_domains']}")
+    console.print(f"Ranked candidate domains:    {result['ranked_candidate_domains']}")
+    console.print(f"Displayed candidate domains: {result['displayed_candidate_domains']}")
+    console.print(f"Candidate priority avg:      {result['candidate_priority_avg']}")
+
+    console.print()
+    console.print("Per-query")
+    console.print("---------")
+    qtable = Table(show_lines=False)
+    for col in ["Category", "Query", "Results", "Unique", "Accepted", "Rejected", "Selected"]:
+        qtable.add_column(col)
+    for q in result["per_query"]:
+        qtable.add_row(
+            q["category"],
+            q["query"],
+            str(q["results"]),
+            str(q["unique"]),
+            str(q["accepted"]),
+            str(q["rejected"]),
+            str(q["selected"]),
+        )
+    console.print(qtable)
+
+    console.print()
+    console.print("Ranked pool")
+    console.print("-----------")
+    rtable = Table(show_lines=False)
+    for col in ["Rank", "Domain", "Priority", "Category", "Source query", "Title"]:
+        rtable.add_column(col)
+    for row in result["ranked"]:
+        rtable.add_row(
+            str(row["rank"]),
+            row["domain"],
+            str(row["priority"]),
+            row["category"],
+            row["source_query"],
+            row["title"],
+        )
+    console.print(rtable)
 
 
 @app.command("list")
