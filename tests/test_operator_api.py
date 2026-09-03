@@ -133,3 +133,19 @@ def test_demo_leads_total_is_before_limit():
     body = response.json()
     assert len(body["items"]) == 2
     assert body["total"] == len(api_mod.DEMO_LEADS)
+
+
+def test_spa_path_containment_rejects_parent_escape(tmp_path: Path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>PactSignal</html>", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("must-not-leak", encoding="utf-8")
+
+    # The SPA route is registered at import time only when the dist directory
+    # exists, so validate the containment primitive directly here.
+    dist_root = dist.resolve()
+    candidate = (dist_root / "../secret.txt").resolve()
+
+    with pytest.raises(ValueError):
+        candidate.relative_to(dist_root)

@@ -119,11 +119,13 @@ docker compose build pactsignal-web
 docker compose up pactsignal-web
 ```
 
-Then open:
+The Compose service binds to localhost by default:
 
 ```text
 http://localhost:8080
 ```
+
+This is intentional because private mode does not yet have application authentication. Use a reverse proxy/authentication layer before exposing it beyond localhost.
 
 Health check:
 

@@ -35,6 +35,8 @@ services:
       - ./data:/data
       - ./secrets:/secrets
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    # Safe-by-default host binding. Put a reverse proxy/auth layer in front
+    # before exposing private mode beyond localhost.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     restart: unless-stopped

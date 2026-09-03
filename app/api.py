@@ -314,7 +314,14 @@ if _DIST_DIR.exists():
     def spa(full_path: str):
         if full_path.startswith("api/"):
             raise HTTPException(status_code=404, detail="Not found")
-        candidate = _DIST_DIR / full_path
+
+        dist_root = _DIST_DIR.resolve()
+        candidate = (dist_root / full_path).resolve()
+        try:
+            candidate.relative_to(dist_root)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Not found")
+
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(_DIST_DIR / "index.html")
+        return FileResponse(dist_root / "index.html")
