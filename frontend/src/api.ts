@@ -5,6 +5,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   headers.set("Content-Type", "application/json");
 
   const response = await fetch(path, {
+    credentials: "same-origin",
     ...init,
     headers
   });
@@ -23,7 +24,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type AuthSession = {
+  authenticated: boolean;
+  username: string;
+  auth_enabled: boolean;
+  expires_in_seconds?: number;
+};
+
 export const api = {
+  session: () => request<AuthSession>("/api/auth/session"),
+  login: (username: string, password: string) =>
+    request<AuthSession>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password })
+    }),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   meta: () => request<Meta>("/api/meta"),
   dashboard: () => request<DashboardData>("/api/dashboard"),
   leads: (params: { q?: string; status?: string; minScore?: number; limit?: number } = {}) => {
