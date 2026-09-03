@@ -1,7 +1,7 @@
 import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { api, type AuthSession } from "./api";
+import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api";
 import { Shell } from "./components/Shell";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LeadReviewPage } from "./pages/LeadReviewPage";
@@ -17,9 +17,8 @@ function Placeholder({ title }: { title: string }) {
   return <div className="full-page-message"><strong>{title}</strong><span>This PactSignal workspace is next in the operator UI milestone.</span></div>;
 }
 
-function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSession) => void }) {
-  const [username, setUsername] = useState("sachin");
-  const [password, setPassword] = useState("");
+function TokenScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [token, setToken] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -27,12 +26,14 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSessi
     event.preventDefault();
     setSubmitting(true);
     setError("");
+    setAccessToken(token);
     try {
-      const session = await api.login(username, password);
+      await api.meta();
       client.clear();
-      onAuthenticated(session);
+      onAuthenticated();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      clearAccessToken();
+      setError(err instanceof Error ? err.message : "Access denied");
     } finally {
       setSubmitting(false);
     }
@@ -51,34 +52,25 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSessi
 
         <div className="auth-copy">
           <span className="auth-kicker">Private operator workspace</span>
-          <h1>Sign in to PactSignal</h1>
-          <p>Your session is protected by a short-lived, HttpOnly JWT cookie.</p>
+          <h1>Unlock PactSignal</h1>
+          <p>Enter the operator API token for this browser session.</p>
         </div>
 
         <form className="auth-form" onSubmit={submit}>
           <label>
-            <span>Username</span>
+            <span>Access token</span>
             <input
-              autoComplete="username"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              required
-            />
-          </label>
-          <label>
-            <span>Password</span>
-            <input
-              autoComplete="current-password"
+              autoComplete="off"
               type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
               required
               autoFocus
             />
           </label>
           {error ? <div className="error-banner compact">{error}</div> : null}
           <button className="button primary auth-submit" disabled={submitting} type="submit">
-            {submitting ? "Signing in…" : "Sign in"}
+            {submitting ? "Checking…" : "Unlock"}
           </button>
         </form>
       </div>
@@ -87,36 +79,29 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSessi
 }
 
 function AuthGate({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<AuthSession | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
 
   useEffect(() => {
-    let active = true;
-    api.session()
-      .then((value) => {
-        if (active) setSession(value);
-      })
-      .catch(() => {
-        if (active) setSession(null);
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
+    api.meta()
+      .then(() => setAuthenticated(true))
+      .catch(() => setAuthenticated(false));
   }, []);
 
-  if (loading) {
-    return <div className="full-page-message"><strong>PactSignal</strong><span>Checking operator session…</span></div>;
+  if (authenticated === null) {
+    return <div className="full-page-message"><strong>PactSignal</strong><span>Checking operator access…</span></div>;
   }
 
-  if (!session?.authenticated) {
-    return <LoginScreen onAuthenticated={setSession} />;
+  if (!authenticated) {
+    return <TokenScreen onAuthenticated={() => setAuthenticated(true)} />;
   }
 
   return <>{children}</>;
+}
+
+export function signOutOperator(): void {
+  clearAccessToken();
+  client.clear();
+  window.location.assign("/");
 }
 
 export default function App() {
