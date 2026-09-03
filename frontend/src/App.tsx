@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, type ReactNode, useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { api, type AuthSession } from "./api";
@@ -86,7 +86,7 @@ function LoginScreen({ onAuthenticated }: { onAuthenticated: (session: AuthSessi
   );
 }
 
-function AuthGate({ children }: { children: React.ReactNode }) {
+function AuthGate({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(true);
 
