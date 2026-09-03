@@ -17,6 +17,7 @@ fail() {
 command -v docker >/dev/null 2>&1 || fail "docker is not installed"
 docker compose version >/dev/null 2>&1 || fail "docker compose plugin is unavailable"
 command -v curl >/dev/null 2>&1 || fail "curl is not installed"
+docker network inspect pactsignal_proxy >/dev/null 2>&1 || docker network create pactsignal_proxy >/dev/null
 
 test -d "$RELEASE_DIR" || fail "release directory missing: $RELEASE_DIR"
 test -f "$SHARED_DIR/.env" || fail "shared runtime env missing: $SHARED_DIR/.env"
