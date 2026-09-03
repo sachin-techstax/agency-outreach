@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .auth import validate_auth_config
 from .config import settings
 from .db import (
     SUPPRESSED_STATUSES,
@@ -213,6 +214,32 @@ def doctor_cmd(
             False,
         )
     )
+    if settings.pactsignal_demo_mode:
+        auth_ok = True
+        auth_detail = "not required in demo mode"
+        auth_required = False
+    elif not settings.pactsignal_auth_enabled:
+        auth_ok = False
+        auth_detail = "PACTSIGNAL_AUTH_ENABLED is false"
+        auth_required = True
+    else:
+        try:
+            validate_auth_config()
+            auth_ok = True
+            auth_detail = f"enabled for {settings.pactsignal_admin_username}"
+        except RuntimeError as exc:
+            auth_ok = False
+            auth_detail = str(exc)
+        auth_required = True
+
+    checks.append(
+        (
+            "Operator JWT auth",
+            auth_ok,
+            auth_detail,
+            auth_required,
+        )
+    )
     checks.append(
         (
             "React build",
@@ -279,11 +306,11 @@ def serve_cmd(
         f"UI:    {'compiled React build found' if dist.exists() else 'API only; frontend/dist not found'}"
     )
 
-    if not effective_demo and host not in {"127.0.0.1", "localhost", "::1"}:
+    if not effective_demo and not settings.pactsignal_auth_enabled:
         console.print()
         console.print(
-            "[yellow]Warning: private mode has no application authentication yet. "
-            "Do not expose this listener directly to the public internet.[/yellow]"
+            "[yellow]Warning: private mode application authentication is disabled. "
+            "Do not expose this listener beyond a trusted proxy or localhost.[/yellow]"
         )
 
     if effective_demo:
