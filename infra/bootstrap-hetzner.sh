@@ -17,6 +17,8 @@ command -v curl >/dev/null 2>&1 || {
   exit 1
 }
 
+docker network inspect pactsignal_proxy >/dev/null 2>&1 || docker network create pactsignal_proxy >/dev/null
+
 sudo mkdir -p   "$APP_ROOT/releases"   "$APP_ROOT/shared/data"   "$APP_ROOT/shared/secrets"
 
 sudo chown -R "$TARGET_USER":"$TARGET_USER" "$APP_ROOT"
@@ -26,7 +28,7 @@ if [ ! -f "$APP_ROOT/shared/.env" ]; then
 SERPER_API_KEY=
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5.6-luna
-YOUR_NAME=Sachin Rajan
+YOUR_NAME="Sachin Rajan"
 PORTFOLIO_URL=
 CALENDLY_URL=
 MIN_SCORE=70
