@@ -178,6 +178,39 @@ def reject_cmd(lead_id: int):
     console.print(f"Rejected lead {lead_id}")
 
 
+@app.command("do-not-contact")
+def do_not_contact_cmd(lead_id: int):
+    """Permanently suppress a lead from normal discovery runs.
+
+    Sets status=do_not_contact.  Historical research/outreach content is
+    preserved.  Future normal ``run`` commands will suppress this domain
+    before crawl.  Gmail is not touched; no email is sent.
+    """
+    r = get_lead(lead_id)
+    if not r:
+        raise typer.BadParameter("Lead not found")
+    update_lead(lead_id, status="do_not_contact")
+    console.print(f"Marked lead {lead_id} ({r['company']}) as do_not_contact")
+
+
+@app.command("allow-contact")
+def allow_contact_cmd(lead_id: int):
+    """Reverse a do_not_contact flag, restoring the lead to a retryable status.
+
+    Sets status=rejected so the domain can be rediscovered on a future normal
+    ``run``.  Historical research/outreach content is preserved.
+    """
+    r = get_lead(lead_id)
+    if not r:
+        raise typer.BadParameter("Lead not found")
+    if r["status"] != "do_not_contact":
+        raise typer.BadParameter(
+            f"Lead {lead_id} is not do_not_contact (current status: {r['status']})"
+        )
+    update_lead(lead_id, status="rejected")
+    console.print(f"Restored lead {lead_id} ({r['company']}) to rejected (retryable)")
+
+
 @app.command("gmail-drafts")
 def gmail_drafts_cmd(limit: int = 10):
     rows = list_leads(status="approved", min_score=settings.min_score, limit=limit)
