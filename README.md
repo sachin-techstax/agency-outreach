@@ -462,3 +462,10 @@ python -m app run --limit 15
 - It does not detect replies in Gmail yet.
 
 Those are good V2 candidates once V1 is producing qualified leads.
+
+
+## CI/CD
+
+GitHub Actions validates PactSignal on pull requests and automatically deploys successful `master` commits to Hetzner after the one-time production bootstrap.
+
+See [`docs/hetzner-cicd.md`](docs/hetzner-cicd.md) for server layout, required Actions secrets, rollback behavior, and the private-network boundary.

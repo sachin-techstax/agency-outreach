@@ -1,0 +1,194 @@
+name: PactSignal CI/CD
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pactsignal-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Prepare local runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp .env.example .env
+          mkdir -p data secrets
+          export LOCAL_UID="$(id -u)"
+          export LOCAL_GID="$(id -g)"
+          echo "LOCAL_UID=$LOCAL_UID" >> "$GITHUB_ENV"
+          echo "LOCAL_GID=$LOCAL_GID" >> "$GITHUB_ENV"
+
+      - name: Build CLI and web images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker compose build outreach pactsignal-web
+
+      - name: Run full Python suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker compose run --rm --entrypoint pytest outreach -q
+
+      - name: Smoke-test PactSignal demo runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PACTSIGNAL_DEMO_MODE=true
+          docker compose up -d pactsignal-web
+
+          cleanup() {
+            docker compose down --remove-orphans || true
+          }
+          trap cleanup EXIT
+
+          body=""
+          for attempt in $(seq 1 30); do
+            if body="$(curl -fsS http://127.0.0.1:8080/api/health 2>/dev/null)"; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "$body"
+          echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"PactSignal"'
+          echo "$body" | grep -Eq '"demo_mode"[[:space:]]*:[[:space:]]*true'
+
+      - name: Verify demo-mode mutation boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          status="$(curl -sS -o /tmp/demo-block.json -w '%{http_code}' \
+            -X POST http://127.0.0.1:8080/api/leads/1/approve)"
+          cat /tmp/demo-block.json
+          test "$status" = "403"
+
+  deploy:
+    name: Deploy to Hetzner
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs:
+      - validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: production
+
+    env:
+      HETZNER_HOST: ${{ secrets.HETZNER_HOST }}
+      HETZNER_USER: ${{ secrets.HETZNER_USER }}
+      HETZNER_SSH_PRIVATE_KEY: ${{ secrets.HETZNER_SSH_PRIVATE_KEY }}
+      HETZNER_KNOWN_HOSTS: ${{ secrets.HETZNER_KNOWN_HOSTS }}
+      HETZNER_SSH_PORT: ${{ secrets.HETZNER_SSH_PORT }}
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for name in HETZNER_HOST HETZNER_USER HETZNER_SSH_PRIVATE_KEY HETZNER_KNOWN_HOSTS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Required GitHub Actions secret $name is missing"
+              exit 1
+            fi
+          done
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$HETZNER_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$HETZNER_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Package exact release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          archive="$RUNNER_TEMP/pactsignal-${GITHUB_SHA}.tar.gz"
+          tar \
+            --exclude='./.git' \
+            --exclude='./.env' \
+            --exclude='./data' \
+            --exclude='./secrets' \
+            --exclude='./.venv' \
+            --exclude='./frontend/node_modules' \
+            --exclude='./frontend/dist' \
+            --exclude='./*.db' \
+            -czf "$archive" .
+          echo "RELEASE_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Upload release archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          port="${HETZNER_SSH_PORT:-22}"
+          remote="/tmp/pactsignal-${GITHUB_SHA}.tar.gz"
+          scp \
+            -i "$HOME/.ssh/id_ed25519" \
+            -P "$port" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$RELEASE_ARCHIVE" \
+            "$HETZNER_USER@$HETZNER_HOST:$remote"
+
+      - name: Activate exact release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          port="${HETZNER_SSH_PORT:-22}"
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p "$port" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "$HETZNER_USER@$HETZNER_HOST" \
+            "APP_ROOT='/srv/agency-outreach' RELEASE_SHA='${GITHUB_SHA}' ARCHIVE='/tmp/pactsignal-${GITHUB_SHA}.tar.gz' bash -s" <<'REMOTE'
+          set -Eeuo pipefail
+
+          : "${APP_ROOT:?APP_ROOT is required}"
+          : "${RELEASE_SHA:?RELEASE_SHA is required}"
+          : "${ARCHIVE:?ARCHIVE is required}"
+
+          releases="$APP_ROOT/releases"
+          shared="$APP_ROOT/shared"
+          release="$releases/$RELEASE_SHA"
+
+          mkdir -p "$releases" "$shared/data" "$shared/secrets"
+          rm -rf "$release"
+          mkdir -p "$release"
+
+          tar -xzf "$ARCHIVE" -C "$release"
+          rm -f "$ARCHIVE"
+
+          test -f "$shared/.env" || {
+            echo "Missing $shared/.env. Complete the one-time server bootstrap first." >&2
+            exit 1
+          }
+
+          ln -sfn "$shared/.env" "$release/.env"
+          ln -sfn "$shared/data" "$release/data"
+          ln -sfn "$shared/secrets" "$release/secrets"
+
+          chmod +x "$release/infra/deploy-release.sh"
+          APP_ROOT="$APP_ROOT" RELEASE_SHA="$RELEASE_SHA" "$release/infra/deploy-release.sh"
+          REMOTE

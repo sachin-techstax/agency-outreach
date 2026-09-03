@@ -3,13 +3,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: agency-outreach:local
+    image: agency-outreach:${DEPLOY_SHA:-local}
     env_file:
       - .env
     environment:
       DB_PATH: /data/agency_outreach.db
       GMAIL_CLIENT_SECRET: /secrets/client_secret.json
       GMAIL_TOKEN_FILE: /secrets/token.json
+      PACTSIGNAL_DEMO_MODE: ${PACTSIGNAL_DEMO_MODE:-false}
     volumes:
       - ./data:/data
       - ./secrets:/secrets
@@ -24,13 +25,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: pactsignal-web:local
+    image: pactsignal-web:${DEPLOY_SHA:-local}
     env_file:
       - .env
     environment:
       DB_PATH: /data/agency_outreach.db
       GMAIL_CLIENT_SECRET: /secrets/client_secret.json
       GMAIL_TOKEN_FILE: /secrets/token.json
+      PACTSIGNAL_DEMO_MODE: ${PACTSIGNAL_DEMO_MODE:-false}
     volumes:
       - ./data:/data
       - ./secrets:/secrets
