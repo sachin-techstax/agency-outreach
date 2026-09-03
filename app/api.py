@@ -7,11 +7,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+import jwt
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
+from .auth import (
+    SESSION_COOKIE,
+    clear_login_failures,
+    decode_session_token,
+    issue_session_token,
+    login_rate_limited,
+    record_login_failure,
+    validate_auth_config,
+    verify_credentials,
+)
 from .config import settings
 from .db import (
     SUPPRESSED_STATUSES,
@@ -45,6 +57,59 @@ app.add_middleware(
 
 _RUN_LOCK = threading.Lock()
 _LATEST_RUN: dict[str, Any] | None = None
+
+_PUBLIC_API_PATHS = {"/api/health", "/api/auth/login"}
+_PROTECTED_DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+@app.on_event("startup")
+def _validate_auth_startup() -> None:
+    validate_auth_config()
+
+
+@app.middleware("http")
+async def _operator_auth(request: Request, call_next):
+    if not settings.pactsignal_auth_enabled or request.method == "OPTIONS":
+        return await call_next(request)
+
+    path = request.url.path
+    is_protected_api = path.startswith("/api/") and path not in _PUBLIC_API_PATHS
+    is_protected_docs = path in _PROTECTED_DOC_PATHS
+    if not is_protected_api and not is_protected_docs:
+        return await call_next(request)
+
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Authentication required"},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    try:
+        claims = decode_session_token(token)
+    except jwt.InvalidTokenError:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Session expired or invalid"},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    username = str(claims.get("sub", ""))
+    if username != settings.pactsignal_admin_username:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "Session is not valid for this operator"},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    request.state.operator = username
+    return await call_next(request)
 
 
 def _parse_list(value: Any) -> list[str]:
@@ -111,7 +176,76 @@ def health() -> dict:
         "ok": True,
         "product": "PactSignal",
         "demo_mode": settings.pactsignal_demo_mode,
+        "auth_enabled": settings.pactsignal_auth_enabled,
     }
+
+
+@app.post("/api/auth/login")
+def login(payload: LoginRequest, request: Request, response: Response) -> dict:
+    if not settings.pactsignal_auth_enabled:
+        return {
+            "authenticated": True,
+            "username": settings.pactsignal_admin_username,
+            "auth_enabled": False,
+        }
+
+    client_host = request.client.host if request.client else "unknown"
+    rate_key = f"{client_host}:{payload.username.strip().lower()}"
+    if login_rate_limited(rate_key):
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again shortly.")
+
+    if not verify_credentials(payload.username, payload.password):
+        record_login_failure(rate_key)
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    clear_login_failures(rate_key)
+    username = settings.pactsignal_admin_username
+    token = issue_session_token(username)
+    ttl_seconds = settings.pactsignal_jwt_ttl_minutes * 60
+    response.set_cookie(
+        key=SESSION_COOKIE,
+        value=token,
+        max_age=ttl_seconds,
+        httponly=True,
+        secure=settings.pactsignal_cookie_secure,
+        samesite="strict",
+        path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "authenticated": True,
+        "username": username,
+        "auth_enabled": True,
+        "expires_in_seconds": ttl_seconds,
+    }
+
+
+@app.get("/api/auth/session")
+def auth_session(request: Request) -> dict:
+    if not settings.pactsignal_auth_enabled:
+        return {
+            "authenticated": True,
+            "username": settings.pactsignal_admin_username,
+            "auth_enabled": False,
+        }
+    return {
+        "authenticated": True,
+        "username": request.state.operator,
+        "auth_enabled": True,
+    }
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response) -> dict:
+    response.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/",
+        secure=settings.pactsignal_cookie_secure,
+        httponly=True,
+        samesite="strict",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True}
 
 
 @app.get("/api/meta")
