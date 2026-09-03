@@ -10,3 +10,5 @@ client_secret.json
 token.json
 leads.csv
 .DS_Store
+frontend/node_modules/
+frontend/dist/

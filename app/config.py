@@ -16,6 +16,13 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     serper_api_key: str = os.getenv("SERPER_API_KEY", "")
@@ -32,6 +39,7 @@ class Settings:
     gmail_token_file: Path = Path(os.getenv("GMAIL_TOKEN_FILE", "token.json"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     log_file: str = os.getenv("LOG_FILE", "").strip()
+    pactsignal_demo_mode: bool = _bool("PACTSIGNAL_DEMO_MODE", False)
 
 
 settings = Settings()
