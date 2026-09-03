@@ -41,4 +41,13 @@ services:
     # before exposing private mode beyond localhost.
     ports:
       - "127.0.0.1:8080:8080"
+    networks:
+      default:
+      pactsignal_proxy:
+        aliases:
+          - pactsignal-web
     restart: unless-stopped
+
+networks:
+  pactsignal_proxy:
+    external: true
