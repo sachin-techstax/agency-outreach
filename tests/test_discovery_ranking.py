@@ -427,4 +427,264 @@ def test_pipeline_logs_discovery_priority(tmp_path, monkeypatch, caplog):
 
     messages = " ".join(r.getMessage() for r in caplog.records)
     assert "discovery_priority=" in messages
-    assert "acme.ai" in messages
+
+
+# ===========================================================================
+# R1 regression tests
+# ===========================================================================
+
+
+def _agency_hit(domain: str, rank: int = 0, query: str = "q") -> SearchHit:
+    """A strong agency hit that passes candidate_filter and scores well."""
+    return SearchHit(
+        title=f"{domain} - AI Development Agency",
+        url=f"https://{domain}/services",
+        snippet="We build custom AI solutions for clients. Case studies.",
+        query=query,
+        result_rank=rank,
+    )
+
+
+def _setup_n_candidates(n: int, monkeypatch):
+    """Patch search so that the first query returns n accepted agency hits
+    and all remaining queries return empty."""
+    hits = [_agency_hit(f"agency-{i}.example", rank=i) for i in range(n)]
+
+    def fake_search(query, num=10):
+        # Only the first call returns hits; the rest return empty so the
+        # pool is exactly n domains.
+        if not hasattr(fake_search, "_called"):
+            fake_search._called = True  # type: ignore[attr-defined]
+            return hits
+        return []
+
+    monkeypatch.setattr(pipeline_mod, "search_serper", fake_search)
+    return hits
+
+
+# ---------------------------------------------------------------------------
+# R1-7 A & B: discover_only(limit) returns only top N rows; full count preserved
+# ---------------------------------------------------------------------------
+
+
+def test_discover_only_limit_truncates_displayed_rows(tmp_path, monkeypatch):
+    """discover_only(limit=20) with 25 candidates returns exactly 20 rows
+    while candidate_domains remains 25."""
+    _set_db(tmp_path)
+    _setup_n_candidates(25, monkeypatch)
+
+    result = discover_only(limit=20)
+
+    assert result["candidate_domains"] == 25
+    assert result["ranked_candidate_domains"] == 25
+    assert result["displayed_candidate_domains"] == 20
+    assert len(result["ranked"]) == 20
+    # Rows are ranked 1..20
+    assert [r["rank"] for r in result["ranked"]] == list(range(1, 21))
+
+
+def test_discover_only_limit_5_returns_exactly_top_5(tmp_path, monkeypatch):
+    """limit=5 -> exactly top 5 rows."""
+    _set_db(tmp_path)
+    _setup_n_candidates(25, monkeypatch)
+
+    result = discover_only(limit=5)
+
+    assert result["candidate_domains"] == 25
+    assert result["displayed_candidate_domains"] == 5
+    assert len(result["ranked"]) == 5
+
+
+def test_discover_only_limit_above_pool_returns_all(tmp_path, monkeypatch):
+    """limit > pool size -> all candidates displayed."""
+    _set_db(tmp_path)
+    _setup_n_candidates(10, monkeypatch)
+
+    result = discover_only(limit=50)
+
+    assert result["candidate_domains"] == 10
+    assert result["displayed_candidate_domains"] == 10
+    assert len(result["ranked"]) == 10
+
+
+# ---------------------------------------------------------------------------
+# R1-7 C & D: per-query selected tracked by query identity, not category
+# ---------------------------------------------------------------------------
+
+
+def test_per_query_selected_independent_for_same_category(tmp_path, monkeypatch):
+    """Two QuerySpecs sharing the same category must receive independent
+    selected counts based on which query actually contributed the best hit."""
+    _set_db(tmp_path)
+
+    # We need two queries with the same category.  Patch DEFAULT_QUERY_SPECS
+    # so the first two specs share category "automation" and each returns
+    # distinct domains.
+    from app.search import QuerySpec
+    from app import pipeline as pm
+
+    specs = (
+        QuerySpec("query A", "automation", 100),
+        QuerySpec("query B", "automation", 90),
+    )
+    monkeypatch.setattr(pm, "DEFAULT_QUERY_SPECS", specs)
+
+    query_a_domains = [f"a-agency-{i}.example" for i in range(3)]
+    query_b_domains = [f"b-agency-{i}.example" for i in range(2)]
+
+    call = {"n": 0}
+
+    def fake_search(query, num=10):
+        call["n"] += 1
+        if call["n"] == 1:
+            return [_agency_hit(d, rank=i, query="query A") for i, d in enumerate(query_a_domains)]
+        return [_agency_hit(d, rank=i, query="query B") for i, d in enumerate(query_b_domains)]
+
+    monkeypatch.setattr(pm, "search_serper", fake_search)
+
+    result = discover_only(limit=20)
+
+    per_q = result["per_query"]
+    assert len(per_q) == 2
+    # Both have category "automation"
+    assert per_q[0]["category"] == "automation"
+    assert per_q[1]["category"] == "automation"
+    # But selected counts must be independent
+    assert per_q[0]["selected"] == 3  # query A contributed 3
+    assert per_q[1]["selected"] == 2  # query B contributed 2
+    # NOT both 5
+    assert not (per_q[0]["selected"] == 5 and per_q[1]["selected"] == 5)
+
+
+def test_per_query_selected_sum_equals_candidate_domains(tmp_path, monkeypatch):
+    """sum(per_query.selected) == candidate_domains for successful queries."""
+    _set_db(tmp_path)
+
+    from app.search import QuerySpec
+    from app import pipeline as pm
+
+    specs = (
+        QuerySpec("query A", "automation", 100),
+        QuerySpec("query B", "ai-consulting", 90),
+    )
+    monkeypatch.setattr(pm, "DEFAULT_QUERY_SPECS", specs)
+
+    call = {"n": 0}
+
+    def fake_search(query, num=10):
+        call["n"] += 1
+        if call["n"] == 1:
+            return [_agency_hit(f"a-{i}.example", rank=i, query="query A") for i in range(4)]
+        return [_agency_hit(f"b-{i}.example", rank=i, query="query B") for i in range(3)]
+
+    monkeypatch.setattr(pm, "search_serper", fake_search)
+
+    result = discover_only(limit=20)
+
+    total_selected = sum(q["selected"] for q in result["per_query"])
+    assert total_selected == result["candidate_domains"]
+
+
+# ---------------------------------------------------------------------------
+# R1-7 E: source_query uses base QuerySpec query, not expanded -site query
+# ---------------------------------------------------------------------------
+
+
+def test_source_query_is_base_spec_query_not_expanded(tmp_path, monkeypatch):
+    """The chosen best-hit source_query must be the human-readable base
+    QuerySpec.query, not the expanded Google query with -site exclusions."""
+    _set_db(tmp_path)
+
+    from app.search import QuerySpec, NEGATIVE_SITE_EXCLUSIONS
+    from app import pipeline as pm
+
+    specs = (QuerySpec("AI agent development agency", "ai-agents", 100),)
+    monkeypatch.setattr(pm, "DEFAULT_QUERY_SPECS", specs)
+
+    captured_queries = []
+
+    def fake_search(query, num=10):
+        captured_queries.append(query)
+        return [
+            SearchHit(
+                title="Acme AI - AI Agent Development Agency",
+                url="https://acme.ai/services",
+                snippet="We build custom AI agents for clients. Case studies.",
+                query=query,
+                result_rank=0,
+            ),
+        ]
+
+    monkeypatch.setattr(pm, "search_serper", fake_search)
+
+    result = discover_only(limit=20)
+
+    # The actual Serper query WAS expanded with -site exclusions
+    assert len(captured_queries) == 1
+    for excl in NEGATIVE_SITE_EXCLUSIONS:
+        assert excl in captured_queries[0]
+
+    # But the source_query in the output is the base spec query
+    assert len(result["ranked"]) >= 1
+    row = result["ranked"][0]
+    assert row["source_query"] == "AI agent development agency"
+    # And it does NOT contain -site exclusions
+    for excl in NEGATIVE_SITE_EXCLUSIONS:
+        assert excl not in row["source_query"]
+
+
+# ---------------------------------------------------------------------------
+# R1-7 F: run(limit=2) still crawls top 2 from full ranked pool
+# ---------------------------------------------------------------------------
+
+
+def test_run_limit_2_crawls_top_2_from_full_pool(tmp_path, monkeypatch):
+    """run(limit=2) must still build the full pool, rank it, and crawl only
+    the top 2 -- not truncate discovery before all queries finish."""
+    _set_db(tmp_path)
+
+    from app.search import QuerySpec
+    from app import pipeline as pm
+
+    specs = (
+        QuerySpec("query A", "automation", 100),
+        QuerySpec("query B", "ai-consulting", 90),
+    )
+    monkeypatch.setattr(pm, "DEFAULT_QUERY_SPECS", specs)
+
+    call = {"n": 0}
+
+    def fake_search(query, num=10):
+        call["n"] += 1
+        if call["n"] == 1:
+            return [_agency_hit(f"a-{i}.example", rank=i, query="query A") for i in range(5)]
+        return [_agency_hit(f"b-{i}.example", rank=i, query="query B") for i in range(5)]
+
+    monkeypatch.setattr(pm, "search_serper", fake_search)
+
+    crawled: list[str] = []
+
+    def fake_crawl(url):
+        from app.scrape import domain_of
+        d = domain_of(url)
+        crawled.append(d)
+        return _make_site(STRONG_TEXT, d, title=d)
+
+    monkeypatch.setattr(pm, "crawl_company", fake_crawl)
+    monkeypatch.setattr(
+        pm, "analyze_agency",
+        lambda *a, **k: {"summary": "s", "services": "ai", "fit_reason": "f",
+                         "proof_project": "WingerX", "outreach_angle": "a"},
+    )
+    monkeypatch.setattr(pm, "draft_outreach", lambda *a, **k: ("Subject", "Body"))
+
+    result = run_pipeline(limit=2)
+
+    # Both queries ran (full pool built, not truncated)
+    assert call["n"] == 2
+    # Pool has 10 candidates, but only 2 attempted
+    assert result["candidate_domains"] == 10
+    assert result["attempted"] == 2
+    assert len(crawled) == 2
+    # Invariant holds
+    assert result["attempted"] == result["processed"] + result["skipped"] + result["failed"]

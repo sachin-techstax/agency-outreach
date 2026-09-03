@@ -103,6 +103,7 @@ def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
             search_failed += 1
             logger.error("Search failed for query %r: %s", query, exc)
             per_query.append({
+                "query_rank": qrank,
                 "category": spec.category,
                 "query": spec.query,
                 "results": 0,
@@ -117,7 +118,10 @@ def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
         search_results_total += len(hits)
 
         for hit in hits:
-            # Stamp provenance metadata onto the hit object.
+            # Stamp provenance metadata onto the hit object.  Use the
+            # human-readable base QuerySpec query (not the expanded -site
+            # string) so source_query provenance stays readable.
+            hit.query = spec.query
             hit.query_category = spec.category
             hit.query_rank = qrank
 
@@ -150,6 +154,7 @@ def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
                 domain_priority[domain] = priority
 
         per_query.append({
+            "query_rank": qrank,
             "category": spec.category,
             "query": spec.query,
             "results": len(hits),
@@ -184,13 +189,14 @@ def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
         candidates[domain] = hit
         candidates_priority[domain] = priority
 
-    # Fill in "selected" counts per query (how many final-pool domains came
-    # from each query category as the chosen best hit).
-    selected_by_category: dict[str, int] = {}
+    # Fill in "selected" counts per query.  Track by query_rank (the stable
+    # identity of each individual QuerySpec) -- NOT by category, because
+    # multiple QuerySpecs share categories (e.g. two "automation" specs).
+    selected_by_rank: dict[int, int] = {}
     for hit in candidates.values():
-        selected_by_category[hit.query_category] = selected_by_category.get(hit.query_category, 0) + 1
+        selected_by_rank[hit.query_rank] = selected_by_rank.get(hit.query_rank, 0) + 1
     for q in per_query:
-        q["selected"] = selected_by_category.get(q["category"], 0)
+        q["selected"] = selected_by_rank.get(q["query_rank"], 0)
 
     rejected_domains = rejected_only
     eligible_count = len(candidates)
@@ -274,14 +280,29 @@ def discover_only(limit: int | None = None) -> dict:
 
     Read-only with respect to leads: no crawl, no OpenAI, no contact
     discovery, no Gmail, no DB writes.  Returns a summary dict with the
-    ranked pool and per-query observability suitable for CLI rendering.
+    full ranked pool metrics and per-query observability, plus a
+    ``ranked`` list containing only the top ``limit`` rows for display.
+
+    The full bounded discovery pool is always built and ranked; ``limit``
+    only truncates the displayed/output rows, not the pool itself.
+
+    Returned metrics:
+      - ``candidate_domains``: total eligible domains in the full pool
+      - ``ranked_candidate_domains``: total ranked domains in the full pool
+      - ``displayed_candidate_domains``: min(limit, ranked_candidate_domains)
+      - ``ranked``: top ``limit`` rows only
     """
     target = limit or settings.discovery_limit
     logger.info("Starting discovery-only run. Pool target: %d", target)
     candidates, priorities, stats = _discover_candidates(target)
 
+    full_pool_size = len(candidates)
+    display_n = min(target, full_pool_size)
+
     ranked_rows: list[dict] = []
     for rank, (domain, hit) in enumerate(candidates.items(), start=1):
+        if rank > display_n:
+            break
         prio = priorities.get(domain)
         ranked_rows.append({
             "rank": rank,
@@ -300,6 +321,7 @@ def discover_only(limit: int | None = None) -> dict:
         "rejected_candidate_domains": stats["rejected_candidate_domains"],
         "candidate_domains": stats["candidate_domains"],
         "ranked_candidate_domains": stats["ranked_candidate_domains"],
+        "displayed_candidate_domains": display_n,
         "candidate_priority_avg": stats["candidate_priority_avg"],
         "per_query": stats["per_query"],
         "ranked": ranked_rows,

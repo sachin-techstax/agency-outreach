@@ -110,6 +110,7 @@ def discover_cmd(
     console.print(f"Rejected before crawl:       {result['rejected_candidate_domains']}")
     console.print(f"Eligible candidate domains:  {result['candidate_domains']}")
     console.print(f"Ranked candidate domains:    {result['ranked_candidate_domains']}")
+    console.print(f"Displayed candidate domains: {result['displayed_candidate_domains']}")
     console.print(f"Candidate priority avg:      {result['candidate_priority_avg']}")
 
     console.print()
