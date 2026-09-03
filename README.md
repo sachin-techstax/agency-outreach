@@ -30,6 +30,56 @@ The repository name and SQLite filename still use the original `agency-outreach`
 
 Edit `PORTFOLIO` in `app/llm.py` if you want different wording.
 
+# PactSignal CLI
+
+The existing pipeline is also available as the PactSignal operator CLI. Existing commands remain compatible, but the CLI is now product-branded and includes runtime inspection helpers.
+
+Local entry points:
+
+```bash
+./pactsignal --help
+python -m app --help
+```
+
+Docker entry point:
+
+```bash
+docker compose run --rm outreach --help
+```
+
+Useful operator commands:
+
+```bash
+# Safe local inspection
+./pactsignal status
+./pactsignal doctor
+
+# Discovery-only ranking, no crawl/LLM/Gmail/DB writes
+./pactsignal discover --limit 20
+
+# Full discovery + qualification + outreach drafting
+./pactsignal run --limit 10
+
+# Human review workflow
+./pactsignal list --status drafted --min-score 70
+./pactsignal show 12
+./pactsignal approve 12
+./pactsignal reject 13
+./pactsignal do-not-contact 14
+
+# Gmail remains draft-only
+./pactsignal gmail-drafts --limit 10
+./pactsignal mark-sent 12
+
+# Start API/UI from the CLI
+./pactsignal serve
+./pactsignal serve --demo --port 8080
+```
+
+`pactsignal doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
+
+The `serve --demo` path forces PactSignal's fictional, read-only portfolio mode. Private mode still requires network-level protection because application authentication has not been added yet.
+
 # PactSignal operator console
 
 The React + FastAPI operator console is implemented as a separate web runtime. It uses the same SQLite database and existing pipeline primitives as the CLI.
@@ -391,8 +441,8 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 
-python -m app.cli init-db
-python -m app.cli run --limit 15
+python -m app init-db
+python -m app run --limit 15
 ```
 
 ## Search costs and dependencies

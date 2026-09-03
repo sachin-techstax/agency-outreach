@@ -21,5 +21,5 @@ RUN chown -R app:app /workspace
 
 USER app
 
-ENTRYPOINT ["python", "-m", "app.cli"]
+ENTRYPOINT ["python", "-m", "app"]
 CMD ["--help"]
