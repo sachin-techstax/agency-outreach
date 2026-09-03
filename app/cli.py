@@ -73,6 +73,13 @@ def _frontend_dist() -> Path:
     return Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 
+def _require_private_mode(action: str) -> None:
+    if settings.pactsignal_demo_mode:
+        raise typer.BadParameter(
+            f"{action} is disabled in PactSignal demo mode."
+        )
+
+
 def _status_counts() -> tuple[list, Counter]:
     init_db()
     rows = list(list_leads(status=None, min_score=0, limit=5000))
@@ -307,6 +314,7 @@ def run_cmd(
     ),
 ) -> None:
     """Run discovery, qualification, contact discovery and outreach drafting."""
+    _require_private_mode("Pipeline execution")
     effective_log_level = "DEBUG" if verbose else settings.log_level
     if verbose:
         configure_logging(level=logging.DEBUG)
@@ -330,6 +338,7 @@ def discover_cmd(
     ),
 ) -> None:
     """Run read-only Serper discovery, filtering, dedupe and priority ranking."""
+    _require_private_mode("External discovery")
     effective_log_level = "DEBUG" if verbose else settings.log_level
     if verbose:
         configure_logging(level=logging.DEBUG)
@@ -423,6 +432,7 @@ def show_cmd(lead_id: int) -> None:
 @app.command("approve")
 def approve_cmd(lead_id: int) -> None:
     """Approve an existing outreach draft."""
+    _require_private_mode("Lead mutation")
     init_db()
     r = get_lead(lead_id)
     if not r or r["status"] not in {"drafted", "rejected"} or not r["draft"]:
@@ -434,6 +444,7 @@ def approve_cmd(lead_id: int) -> None:
 @app.command("reject")
 def reject_cmd(lead_id: int) -> None:
     """Reject a lead while keeping it retryable for future discovery."""
+    _require_private_mode("Lead mutation")
     init_db()
     if not get_lead(lead_id):
         raise typer.BadParameter("Lead not found")
@@ -444,6 +455,7 @@ def reject_cmd(lead_id: int) -> None:
 @app.command("do-not-contact")
 def do_not_contact_cmd(lead_id: int) -> None:
     """Permanently suppress a lead from normal discovery runs."""
+    _require_private_mode("Lead mutation")
     init_db()
     r = get_lead(lead_id)
     if not r:
@@ -455,6 +467,7 @@ def do_not_contact_cmd(lead_id: int) -> None:
 @app.command("allow-contact")
 def allow_contact_cmd(lead_id: int) -> None:
     """Reverse a do_not_contact flag and restore the lead to retryable."""
+    _require_private_mode("Lead mutation")
     init_db()
     r = get_lead(lead_id)
     if not r:
@@ -470,9 +483,7 @@ def allow_contact_cmd(lead_id: int) -> None:
 @app.command("gmail-drafts")
 def gmail_drafts_cmd(limit: int = 10) -> None:
     """Create unsent Gmail drafts for approved leads."""
-    if settings.pactsignal_demo_mode:
-        raise typer.BadParameter("Gmail actions are disabled in PactSignal demo mode.")
-
+    _require_private_mode("Gmail actions")
     init_db()
     rows = list_leads(
         status="approved",
@@ -496,9 +507,7 @@ def gmail_drafts_cmd(limit: int = 10) -> None:
 @app.command("mark-sent")
 def mark_sent_cmd(lead_id: int) -> None:
     """Mark a manually sent outreach email and schedule its follow-up."""
-    if settings.pactsignal_demo_mode:
-        raise typer.BadParameter("Sent-state mutation is disabled in PactSignal demo mode.")
-
+    _require_private_mode("Sent-state mutation")
     init_db()
     if not get_lead(lead_id):
         raise typer.BadParameter("Lead not found")
@@ -524,6 +533,7 @@ def due_followups_cmd() -> None:
 @app.command("followup-draft")
 def followup_draft_cmd(lead_id: int) -> None:
     """Generate a concise follow-up for a sent lead."""
+    _require_private_mode("Follow-up generation")
     init_db()
     r = get_lead(lead_id)
     if not r or r["status"] != "sent":

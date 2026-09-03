@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -18,11 +19,16 @@ def restore_settings():
     original_demo = settings.pactsignal_demo_mode
     original_serper = settings.serper_api_key
     original_openai = settings.openai_api_key
+    original_demo_env = os.environ.get("PACTSIGNAL_DEMO_MODE")
     yield
     object.__setattr__(settings, "db_path", original_db)
     object.__setattr__(settings, "pactsignal_demo_mode", original_demo)
     object.__setattr__(settings, "serper_api_key", original_serper)
     object.__setattr__(settings, "openai_api_key", original_openai)
+    if original_demo_env is None:
+        os.environ.pop("PACTSIGNAL_DEMO_MODE", None)
+    else:
+        os.environ["PACTSIGNAL_DEMO_MODE"] = original_demo_env
 
 
 def test_help_is_branded_pactsignal():
@@ -130,3 +136,25 @@ def test_serve_demo_sets_read_only_mode(monkeypatch):
     assert calls["host"] == "127.0.0.1"
     assert calls["port"] == 9090
     assert "Demo safety is active" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["run", "--limit", "1"],
+        ["discover", "--limit", "1"],
+        ["approve", "1"],
+        ["reject", "1"],
+        ["do-not-contact", "1"],
+        ["allow-contact", "1"],
+        ["mark-sent", "1"],
+        ["followup-draft", "1"],
+    ],
+)
+def test_demo_mode_blocks_risky_cli_commands(command):
+    object.__setattr__(settings, "pactsignal_demo_mode", True)
+
+    result = runner.invoke(cli_mod.app, command)
+
+    assert result.exit_code != 0
+    assert "disabled in PactSignal demo mode" in result.stdout

@@ -11,3 +11,5 @@ secrets
 client_secret.json
 token.json
 leads.csv
+frontend/node_modules
+frontend/dist
