@@ -73,6 +73,8 @@ export const api = {
   runOutreach: (limit = 10) =>
     request<RunRow>(`/api/runs/outreach?limit=${limit}`, { method: "POST" }),
   runs: (limit = 50) => request<RunList>(`/api/runs?limit=${limit}`),
+  runsByType: (type: string, limit = 50) =>
+    request<RunList>(`/api/runs?type=${type}&limit=${limit}`),
   run: (id: number) => request<RunRow>(`/api/runs/${id}`),
   followups: () => request<FollowupList>("/api/followups")
 };

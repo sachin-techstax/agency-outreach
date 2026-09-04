@@ -529,6 +529,8 @@ def run(
             contact = discover_contact(
                 site["text"], site["pages"], site["domain"],
                 site.get("mailtos", []),
+                home_text=site.get("home_text"),
+                home_url=site.get("root"),
             )
             if not contact.get("contact_email"):
                 no_contact += 1
@@ -749,6 +751,8 @@ def refresh_lead_research(lead_id: int) -> dict:
 
     contact = discover_contact(
         site["text"], site["pages"], site["domain"], site.get("mailtos", []),
+        home_text=site.get("home_text"),
+        home_url=site.get("root"),
     )
 
     analysis = analyze_agency(company, site["root"], site["text"])

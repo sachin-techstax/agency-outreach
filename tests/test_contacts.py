@@ -7,6 +7,7 @@ from app.scrape import _select_research_pages, score_path
 
 
 DOMAIN = "company.com"
+HOME_URL = "https://company.com"
 CONTACT_URL = "https://company.com/contact"
 ABOUT_URL = "https://company.com/about"
 SERVICES_URL = "https://company.com/services"
@@ -159,13 +160,20 @@ def test_mailto_uppercase_is_normalized_to_lowercase():
 
 def test_duplicate_email_is_deduplicated():
     # Same email in visible text AND a mailto href AND on a crawled page.
-    text = "Contact us at hello@company.com."
+    # When home_text is provided, the combined `text` is NOT scanned for
+    # provenance, so the contact page URL wins (R1-1).
+    home_text = "Welcome to Company."  # no email on homepage
+    text = "Contact us at hello@company.com."  # combined text contains it
     pages = [(CONTACT_URL, "Email us at hello@company.com anytime.")]
     mailtos = [("mailto:hello@company.com", CONTACT_URL)]
-    result = discover_contact(text, pages, DOMAIN, mailtos)
+    result = discover_contact(
+        text, pages, DOMAIN, mailtos,
+        home_text=home_text, home_url=HOME_URL,
+    )
     assert result["contact_email"] == "hello@company.com"
-    # Provenance is the first source seen (homepage text -> "website").
-    assert result["contact_source"] == "website"
+    # Provenance is the contact page URL, NOT the homepage, because the
+    # homepage text did not contain the email.
+    assert result["contact_source"] == CONTACT_URL
 
 
 def test_third_party_domain_email_is_rejected():
@@ -296,6 +304,24 @@ def test_select_research_pages_dedupes_normalized_urls():
     assert selected.count("https://company.com/contact") == 1
 
 
+def test_select_research_pages_dedupes_query_variants():
+    # R1-2: tracking query variants of the same content page must not consume
+    # separate bounded crawl slots.
+    root = "https://company.com"
+    hrefs = [
+        "/contact",
+        "/contact/",
+        "/contact#team",
+        "/contact?utm_source=nav",
+        "/contact?utm_source=footer",
+        "/contact?utm_source=nav&campaign=launch",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    # Only one contact research target should remain after normalization.
+    assert selected.count("https://company.com/contact") == 1
+    assert len(selected) == 1
+
+
 def test_select_research_pages_ignores_other_domains():
     root = "https://company.com"
     hrefs = [
@@ -313,3 +339,91 @@ def test_select_research_pages_is_bounded():
     selected = _select_research_pages(root, DOMAIN, hrefs)
     from app.scrape import MAX_EXTRA_PAGES
     assert len(selected) <= MAX_EXTRA_PAGES
+
+
+# ---------------------------------------------------------------------------
+# R1-9: Integration tests across the scraper/contact contract.
+# These model the REAL crawl_company() output shape (home_text separate from
+# combined text) and assert provenance is the actual page URL, not a synthetic
+# "website" label and not the combined text.
+# ---------------------------------------------------------------------------
+
+def test_integration_homepage_links_to_contact_page_visible_email():
+    # Case A: homepage links to many service pages plus /contact.
+    # Contact page visible text contains hello@example.com.
+    # Expected: contact page fetched, email discovered, source = contact URL.
+    home_text = "Welcome to Example. We build AI solutions for agencies."
+    contact_text = "Reach us at hello@example.com for project inquiries."
+    combined = home_text + "\n" + contact_text  # combined text also has it
+    pages = [("https://example.com/contact", contact_text)]
+    mailtos = []
+    result = discover_contact(
+        combined, pages, "example.com", mailtos,
+        home_text=home_text, home_url="https://example.com",
+    )
+    assert result["contact_email"] == "hello@example.com"
+    assert result["contact_source"] == "https://example.com/contact"
+
+
+def test_integration_contact_page_only_mailto():
+    # Case B: contact page contains only a mailto link (no visible email).
+    home_text = "Welcome to Example."
+    contact_text = "Email us"  # no visible email
+    combined = home_text + "\n" + contact_text
+    pages = [("https://example.com/contact", contact_text)]
+    mailtos = [("mailto:hello@example.com?subject=Project", "https://example.com/contact")]
+    result = discover_contact(
+        combined, pages, "example.com", mailtos,
+        home_text=home_text, home_url="https://example.com",
+    )
+    assert result["contact_email"] == "hello@example.com"
+    assert result["contact_source"] == "https://example.com/contact"
+
+
+def test_integration_same_email_visible_and_mailto_and_combined():
+    # Case C: same contact email exists in visible page text, mailto, and
+    # combined research text. Provenance must be the actual contact page URL.
+    home_text = "Welcome to Example."
+    contact_text = "Email us at hello@example.com anytime."
+    combined = home_text + "\n" + contact_text  # combined also contains it
+    pages = [("https://example.com/contact", contact_text)]
+    mailtos = [("mailto:hello@example.com", "https://example.com/contact")]
+    result = discover_contact(
+        combined, pages, "example.com", mailtos,
+        home_text=home_text, home_url="https://example.com",
+    )
+    assert result["contact_email"] == "hello@example.com"
+    assert result["contact_source"] == "https://example.com/contact"
+
+
+def test_integration_homepage_email_provenance_is_home_url():
+    # When the email is ONLY on the homepage, provenance should be the actual
+    # homepage URL (https://example.com), not the string "website".
+    home_text = "Welcome to Example. Contact us at hello@example.com."
+    combined = home_text
+    pages = []
+    mailtos = []
+    result = discover_contact(
+        combined, pages, "example.com", mailtos,
+        home_text=home_text, home_url="https://example.com",
+    )
+    assert result["contact_email"] == "hello@example.com"
+    assert result["contact_source"] == "https://example.com"
+
+
+def test_integration_query_variants_do_not_consume_multiple_slots():
+    # Case D: tracking-query duplicates must not consume multiple crawl slots.
+    root = "https://example.com"
+    hrefs = [
+        "/contact",
+        "/contact?utm_source=nav",
+        "/contact?utm_source=footer",
+        "/contact?utm_campaign=launch",
+        "/about",
+        "/services",
+    ]
+    selected = _select_research_pages(root, "example.com", hrefs)
+    # Only one /contact target should remain.
+    contact_targets = [u for u in selected if "/contact" in u]
+    assert len(contact_targets) == 1
+    assert contact_targets[0] == "https://example.com/contact"

@@ -1,51 +1,105 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState, Score } from "../components/Primitives";
 import type { DiscoveryResult } from "../types";
 
 const BATCH_OPTIONS = [5, 10, 20];
+const POLL_INTERVAL_MS = 3000;
 
 export function DiscoveryPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
-  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard, refetchInterval: 5000 });
+
+  // R1-4: The Discovery page uses the most recent PERSISTED discovery run as
+  // its source of truth — not dashboard.latest_run (which is overwritten when
+  // a processing run executes).  This survives processing runs and container
+  // restarts.
+  const discoveryRuns = useQuery({
+    queryKey: ["runs", "discovery"],
+    queryFn: () => api.runsByType("discovery", 1),
+  });
+
   const [batchSize, setBatchSize] = useState(10);
   const [error, setError] = useState("");
+  const [activeRunId, setActiveRunId] = useState<number | null>(null);
 
-  // The latest discovery result is surfaced via the dashboard's latest_run,
-  // which is the in-memory result of the most recent run.  For a richer view
-  // we treat the latest_run as the discovery summary when its type matches.
-  const latestRun = dashboard.data?.latest_run as DiscoveryResult | null;
-  const runRow = dashboard.data?.latest_run_row;
   const demoMode = Boolean(meta.data?.demo_mode);
-  const runActive = runRow?.status === "running" || runRow?.status === "queued";
+
+  // The latest persisted discovery run row (with result_json parsed).
+  const latestDiscoveryRow = discoveryRuns.data?.items?.[0] ?? null;
+  const discoveryResult: DiscoveryResult | null =
+    latestDiscoveryRow?.result ?? null;
+
+  // R1-5: Poll the active run until it reaches a terminal state.
+  // When a run is started (discovery or processing), poll its specific row
+  // every few seconds.  On terminal state, invalidate all relevant queries so
+  // the page updates automatically without manual refresh.
+  const activeRun = useQuery({
+    queryKey: ["run", activeRunId],
+    queryFn: () => api.run(activeRunId!),
+    enabled: activeRunId !== null,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === "completed" || status === "failed") {
+        return false; // stop polling
+      }
+      return POLL_INTERVAL_MS;
+    },
+  });
+
+  // When the active run reaches a terminal state, invalidate everything and
+  // clear the active run id so the page shows the final result.
+  useEffect(() => {
+    if (activeRun.data && (activeRun.data.status === "completed" || activeRun.data.status === "failed")) {
+      setActiveRunId(null);
+      queryClient.invalidateQueries({ queryKey: ["runs", "discovery"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }
+  }, [activeRun.data, queryClient]);
+
+  // Also check the dashboard's latest_run_row for an active run (e.g. one
+  // started from another tab/page).  If it's active, poll it too.
+  const dashboardRunRow = dashboard.data?.latest_run_row;
+  useEffect(() => {
+    if (activeRunId === null && dashboardRunRow &&
+        (dashboardRunRow.status === "running" || dashboardRunRow.status === "queued")) {
+      setActiveRunId(dashboardRunRow.id);
+    }
+  }, [dashboardRunRow, activeRunId]);
+
+  const runActive =
+    activeRunId !== null ||
+    (dashboardRunRow?.status === "running") ||
+    (dashboardRunRow?.status === "queued");
 
   const discovery = useMutation({
     mutationFn: () => api.runDiscovery(20),
-    onSuccess: () => {
+    onSuccess: (data) => {
       setError("");
+      setActiveRunId(data.id);
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
     },
     onError: (err: Error) => setError(err.message)
   });
 
   const process = useMutation({
     mutationFn: () => api.runProcess(batchSize),
-    onSuccess: () => {
+    onSuccess: (data) => {
       setError("");
+      setActiveRunId(data.id);
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
       navigate("/runs");
     },
     onError: (err: Error) => setError(err.message)
   });
 
-  const ranked = latestRun?.ranked ?? [];
-  const isDiscovery = latestRun?.type === "discovery";
+  const ranked = discoveryResult?.ranked ?? [];
+  const isDiscovery = discoveryResult?.type === "discovery";
 
   return (
     <>
@@ -81,12 +135,12 @@ export function DiscoveryPage() {
 
       <section className="page-body">
         {error && <div className="error-banner">{error}</div>}
-        {runActive && runRow && (
+        {runActive && (
           <div className="run-banner">
             <span className="spinner" />
             <div>
-              <strong>{runRow.type === "discovery" ? "Discovery" : "Process prospects"} run in progress</strong>
-              <span>Started {new Date(runRow.started_at).toLocaleString()}</span>
+              <strong>Run in progress</strong>
+              <span>Polling for completion…</span>
             </div>
           </div>
         )}
@@ -95,20 +149,20 @@ export function DiscoveryPage() {
           <EmptyState>No discovery result yet. Run discovery to see eligible ranked candidates.</EmptyState>
         )}
 
-        {isDiscovery && latestRun && (
+        {isDiscovery && discoveryResult && (
           <>
             <section className="metrics-strip">
-              <Metric label="Raw results" value={latestRun.search_results_total ?? 0} detail="total search results" tone="blue" />
-              <Metric label="Raw domains" value={latestRun.raw_candidate_domains ?? 0} detail="unique candidate domains" tone="blue" />
-              <Metric label="Eligible" value={latestRun.candidate_domains ?? 0} detail="passed candidate filter" tone="violet" />
-              <Metric label="Avg priority" value={latestRun.candidate_priority_avg ?? 0} detail="discovery priority score" tone="amber" />
+              <Metric label="Raw results" value={discoveryResult.search_results_total ?? 0} detail="total search results" tone="blue" />
+              <Metric label="Raw domains" value={discoveryResult.raw_candidate_domains ?? 0} detail="unique candidate domains" tone="blue" />
+              <Metric label="Eligible" value={discoveryResult.candidate_domains ?? 0} detail="passed candidate filter" tone="violet" />
+              <Metric label="Avg priority" value={discoveryResult.candidate_priority_avg ?? 0} detail="discovery priority score" tone="amber" />
             </section>
 
             <section className="panel">
               <div className="panel-header">
                 <div>
                   <h2>Ranked candidates</h2>
-                  <p>{latestRun.displayed_candidate_domains ?? ranked.length} of {latestRun.ranked_candidate_domains ?? ranked.length} eligible · {latestRun.query_count ?? "—"} queries</p>
+                  <p>{discoveryResult.displayed_candidate_domains ?? ranked.length} of {discoveryResult.ranked_candidate_domains ?? ranked.length} eligible · {discoveryResult.query_count ?? "—"} queries</p>
                 </div>
               </div>
               <div className="table-head discovery-columns">

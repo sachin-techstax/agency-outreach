@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import threading
-import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -15,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .auth import validate_auth_config, valid_api_token
 from .config import settings
+from .logging_config import get_logger
 from .db import (
     RUN_COMPLETED,
     RUN_FAILED,
@@ -30,7 +30,9 @@ from .db import (
     init_db,
     list_leads,
     list_runs,
+    list_runs_by_type,
     now_iso,
+    reconcile_abandoned_runs,
     set_run_progress,
     update_lead,
     update_run,
@@ -38,6 +40,8 @@ from .db import (
 from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
 from .gmail_client import create_draft
 from .pipeline import discover_only, refresh_lead_research, run as run_pipeline
+
+logger = get_logger("api")
 
 app = FastAPI(
     title="PactSignal Operator API",
@@ -65,8 +69,19 @@ _PUBLIC_API_PATHS = {"/api/health"}
 
 
 @app.on_event("startup")
-def _validate_auth_startup() -> None:
+def _startup_reconcile() -> None:
+    """Validate auth config and reconcile abandoned runs from a previous
+    process (R1-6).  Because background runs execute in daemon threads inside
+    this process, any persisted ``queued`` or ``running`` row found during a
+    fresh startup cannot still have a live worker and is marked ``failed``.
+    """
     validate_auth_config()
+    try:
+        reconciled = reconcile_abandoned_runs()
+        if reconciled:
+            logger.info("Reconciled %d abandoned run(s) on startup", reconciled)
+    except Exception as exc:
+        logger.warning("Run reconciliation failed on startup: %s", exc)
 
 
 @app.middleware("http")
@@ -148,6 +163,44 @@ def _run_exclusive(fn):
         _RUN_LOCK.release()
 
 
+def _sanitize_result_for_storage(run_type: str, result: dict) -> dict:
+    """Build a sanitized result snapshot safe to persist in ``result_json``.
+
+    Strips any field that could carry secrets (tracebacks, raw exception
+    objects, credentials).  For discovery runs, preserves the ranked
+    candidate list and pool metrics so the Discovery page can rebuild from
+    the DB after a restart or after a later processing run overwrites
+    ``_LATEST_RUN``.  For processing runs, preserves the summary metrics.
+    """
+    if run_type == RUN_TYPE_DISCOVERY:
+        return {
+            "type": run_type,
+            "query_count": result.get("query_count"),
+            "search_results_total": result.get("search_results_total"),
+            "raw_candidate_domains": result.get("raw_candidate_domains"),
+            "rejected_candidate_domains": result.get("rejected_candidate_domains"),
+            "candidate_domains": result.get("candidate_domains"),
+            "ranked_candidate_domains": result.get("ranked_candidate_domains"),
+            "displayed_candidate_domains": result.get("displayed_candidate_domains"),
+            "candidate_priority_avg": result.get("candidate_priority_avg"),
+            "per_query": result.get("per_query"),
+            "ranked": result.get("ranked", []),
+        }
+    # Processing run: keep summary metrics only (no secrets, no tracebacks).
+    return {
+        "type": run_type,
+        "attempted": result.get("attempted"),
+        "processed": result.get("processed"),
+        "qualified": result.get("qualified"),
+        "drafted": result.get("drafted"),
+        "below_score": result.get("below_score"),
+        "no_contact": result.get("no_contact"),
+        "skipped": result.get("skipped"),
+        "failed": result.get("failed"),
+        "duration_s": result.get("duration_s"),
+    }
+
+
 def _serialize_run(row: Any) -> dict:
     data = dict(row)
     progress = data.get("progress")
@@ -158,6 +211,14 @@ def _serialize_run(row: Any) -> dict:
             data["progress"] = None
     else:
         data["progress"] = None
+    result_json = data.get("result_json")
+    if result_json:
+        try:
+            data["result"] = json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            data["result"] = None
+    else:
+        data["result"] = None
     return data
 
 
@@ -171,65 +232,92 @@ def _start_background_run(
     The lock is claimed synchronously so a concurrent run returns 409 before
     any work starts.  The lock is held until the background worker finishes.
 
+    R1-7: lock ownership is exception-safe.  If anything fails after the
+    lock is acquired but before the background worker successfully owns
+    execution (create_run, update_run, or thread.start), the lock is
+    released and any already-created run row is marked failed.  Once the
+    worker starts, the worker owns the lock and releases it in its
+    ``finally``.
+
     ``executor`` receives ``(limit, progress_cb)`` and returns the pipeline
     summary dict.  The run row is transitioned queued -> running -> completed
-    or failed, with progress snapshots persisted along the way.
+    or failed, with progress snapshots persisted along the way.  A sanitized
+    result snapshot is persisted in ``result_json`` so the Discovery page
+    and Dashboard can rebuild from the DB after a restart or after a later
+    run overwrites the in-memory ``_LATEST_RUN``.
     """
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
             detail="A PactSignal run is already in progress",
         )
-    run_id = create_run(run_type, requested_limit=limit)
-    update_run(run_id, status=RUN_RUNNING)
-    global _LATEST_RUN
-
-    def worker() -> None:
+    run_id: int | None = None
+    try:
+        run_id = create_run(run_type, requested_limit=limit)
+        update_run(run_id, status=RUN_RUNNING)
         global _LATEST_RUN
-        try:
-            def progress_cb(snapshot: dict) -> None:
-                set_run_progress(run_id, snapshot)
 
-            result = executor(limit, progress_cb)
-            summary_fields = {
-                "status": RUN_COMPLETED,
-                "completed_at": now_iso(),
-                "query_count": result.get("query_count"),
-                "raw_candidate_domains": result.get("raw_candidate_domains"),
-                "candidate_domains": result.get("candidate_domains"),
-                "fresh_retryable_pool": result.get("fresh_retryable_pool"),
-                "attempted": result.get("attempted"),
-                "processed": result.get("processed"),
-                "qualified": result.get("qualified"),
-                "drafted": result.get("drafted"),
-                "below_score": result.get("below_score"),
-                "no_contact": result.get("no_contact"),
-                "skipped": result.get("skipped"),
-                "failed_count": result.get("failed"),
-                "duration_s": result.get("duration_s"),
-                "error_summary": None,
-            }
-            update_run(run_id, **summary_fields)
-            _LATEST_RUN = {"type": run_type, **result}
-        except Exception as exc:
-            error_summary = f"{type(exc).__name__}: {exc}"[:500]
-            update_run(
-                run_id,
-                status=RUN_FAILED,
-                completed_at=now_iso(),
-                error_summary=error_summary,
-            )
-            logger_error = traceback.format_exc()
-            _LATEST_RUN = {
-                "type": run_type,
-                "error": error_summary,
-                "traceback": logger_error,
-            }
-        finally:
-            _RUN_LOCK.release()
+        def worker() -> None:
+            global _LATEST_RUN
+            try:
+                def progress_cb(snapshot: dict) -> None:
+                    set_run_progress(run_id, snapshot)
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+                result = executor(limit, progress_cb)
+                sanitized = _sanitize_result_for_storage(run_type, result)
+                summary_fields = {
+                    "status": RUN_COMPLETED,
+                    "completed_at": now_iso(),
+                    "query_count": result.get("query_count"),
+                    "raw_candidate_domains": result.get("raw_candidate_domains"),
+                    "candidate_domains": result.get("candidate_domains"),
+                    "fresh_retryable_pool": result.get("fresh_retryable_pool"),
+                    "attempted": result.get("attempted"),
+                    "processed": result.get("processed"),
+                    "qualified": result.get("qualified"),
+                    "drafted": result.get("drafted"),
+                    "below_score": result.get("below_score"),
+                    "no_contact": result.get("no_contact"),
+                    "skipped": result.get("skipped"),
+                    "failed_count": result.get("failed"),
+                    "duration_s": result.get("duration_s"),
+                    "error_summary": None,
+                    "result_json": json.dumps(sanitized, separators=(",", ":")),
+                }
+                update_run(run_id, **summary_fields)
+                _LATEST_RUN = {"type": run_type, **result}
+            except Exception as exc:
+                error_summary = f"{type(exc).__name__}: {exc}"[:500]
+                update_run(
+                    run_id,
+                    status=RUN_FAILED,
+                    completed_at=now_iso(),
+                    error_summary=error_summary,
+                )
+                _LATEST_RUN = {
+                    "type": run_type,
+                    "error": error_summary,
+                }
+            finally:
+                _RUN_LOCK.release()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+    except Exception:
+        # Pre-worker failure: release the lock and mark the run failed so a
+        # later run is not permanently locked out (R1-7).
+        _RUN_LOCK.release()
+        if run_id is not None:
+            try:
+                update_run(
+                    run_id,
+                    status=RUN_FAILED,
+                    completed_at=now_iso(),
+                    error_summary="Run failed to start",
+                )
+            except Exception:
+                pass
+        raise
     return _serialize_run(get_run(run_id))
 
 
@@ -282,15 +370,22 @@ def dashboard() -> dict:
 
     # Surface the most recent run row so the UI can show real persisted state
     # (status, started_at, type) instead of only the in-memory latest run.
+    # R1-8: the persisted row is authoritative.  When ``_LATEST_RUN`` is empty
+    # (e.g. after a process restart) but a completed run exists in the DB,
+    # rebuild the latest-run payload from the persisted ``result_json`` so the
+    # Dashboard still shows the most recent completed run metrics.
     recent_runs = list_runs(limit=1)
     latest_run_row = _serialize_run(recent_runs[0]) if recent_runs else None
+    latest_run = _LATEST_RUN
+    if latest_run is None and latest_run_row and latest_run_row.get("result"):
+        latest_run = latest_run_row["result"]
 
     return {
         "mode": "private",
         "counts": counts,
         "due_followups": len(due_followups(now_iso())),
         "review_queue": review_queue,
-        "latest_run": _LATEST_RUN,
+        "latest_run": latest_run,
         "latest_run_row": latest_run_row,
     }
 
@@ -479,12 +574,24 @@ def run_outreach(limit: int = Query(default=10, ge=1, le=50)) -> dict:
 
 
 @app.get("/api/runs")
-def runs(limit: int = Query(default=50, ge=1, le=200)) -> dict:
-    """List recent persistent run rows (most recent first)."""
+def runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    type: str | None = Query(default=None),
+) -> dict:
+    """List recent persistent run rows (most recent first).
+
+    Optional ``type`` filter (``discovery`` or ``processing``) restricts the
+    list to a single run type.  Used by the Discovery page to retrieve the
+    most recent persisted discovery run independent of ``_LATEST_RUN``
+    (R1-4).
+    """
     if settings.pactsignal_demo_mode:
         return {"items": [], "total": 0}
     init_db()
-    rows = [_serialize_run(r) for r in list_runs(limit=limit)]
+    if type:
+        rows = [_serialize_run(r) for r in list_runs_by_type(type, limit=limit)]
+    else:
+        rows = [_serialize_run(r) for r in list_runs(limit=limit)]
     return {"items": rows, "total": len(rows)}
 
 

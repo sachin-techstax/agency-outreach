@@ -71,6 +71,7 @@ export type RunRow = {
   duration_s?: number | null;
   error_summary?: string | null;
   progress?: Record<string, unknown> | null;
+  result?: DiscoveryResult | null;
 };
 
 export type RunList = {

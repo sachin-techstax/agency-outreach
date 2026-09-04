@@ -414,6 +414,7 @@ def _make_site(text, domain, title="Example"):
         "root": f"https://{domain}",
         "domain": domain,
         "title": title,
+        "home_text": text,
         "text": text,
         "pages": [],
         "mailtos": [],
@@ -496,6 +497,7 @@ def test_refresh_research_recovers_missed_contact(tmp_path, monkeypatch):
         "root": "https://launchpadlab.com",
         "domain": "launchpadlab.com",
         "title": "LaunchPad Lab",
+        "home_text": STRONG_TEXT,
         "text": STRONG_TEXT,
         "pages": [(contact_page_url, "Email us")],
         "mailtos": [("mailto:hello@launchpadlab.com", contact_page_url)],
@@ -676,3 +678,289 @@ def test_followups_demo_mode_returns_demo_sent_leads():
     body = resp.json()
     assert body["total"] > 0
     assert all(item["status"] == "sent" for item in body["items"])
+
+
+# ---------------------------------------------------------------------------
+# R1-3 / R1-4: Discovery result persistence + retrieval from DB
+# ---------------------------------------------------------------------------
+
+
+def _patch_discovery_with_ranked(monkeypatch):
+    """Patch discovery to return a result with a ranked candidate list."""
+    def fake_discover(limit, progress_cb=None):
+        if progress_cb:
+            progress_cb({"stage": "discovery", "queries_completed": 1})
+        return {
+            "query_count": 2,
+            "search_results_total": 20,
+            "raw_candidate_domains": 15,
+            "rejected_candidate_domains": 3,
+            "candidate_domains": 12,
+            "ranked_candidate_domains": 12,
+            "displayed_candidate_domains": min(limit, 12),
+            "candidate_priority_avg": 42.5,
+            "per_query": [{"query": "ai agency", "hits": 10}],
+            "ranked": [
+                {"rank": 1, "domain": "alpha.example", "priority": 90,
+                 "reasons": "strong", "category": "ai", "source_query": "ai agency",
+                 "title": "Alpha", "url": "https://alpha.example"},
+            ],
+            "attempted": 0, "processed": 0, "qualified": 0, "drafted": 0,
+            "below_score": 0, "no_contact": 0, "skipped": 0, "failed": 0,
+            "duration_s": 0.5,
+            "fresh_retryable_pool": 12,
+        }
+    monkeypatch.setattr(api_mod, "discover_only", fake_discover)
+
+
+def test_discovery_result_persisted_in_result_json(tmp_path, monkeypatch):
+    """R1-3: completed discovery run stores ranked candidates in result_json."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    resp = client.post("/api/runs/discovery?limit=10")
+    run_id = resp.json()["id"]
+    done = _wait_run_done(client, run_id)
+
+    assert done["status"] == RUN_COMPLETED
+    assert done["result"] is not None
+    assert done["result"]["type"] == RUN_TYPE_DISCOVERY
+    assert len(done["result"]["ranked"]) == 1
+    assert done["result"]["ranked"][0]["domain"] == "alpha.example"
+    assert done["result"]["query_count"] == 2
+
+
+def test_discovery_result_survives_processing_run(tmp_path, monkeypatch):
+    """R1-3/R1-4: after a processing run overwrites _LATEST_RUN, the discovery
+    result is still retrievable from the persisted discovery run row."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    # Run discovery first.
+    d = client.post("/api/runs/discovery?limit=10")
+    d_id = d.json()["id"]
+    _wait_run_done(client, d_id)
+
+    # Now run processing — this overwrites _LATEST_RUN.
+    p = client.post("/api/runs/process?limit=5")
+    _wait_run_done(client, p.json()["id"])
+
+    # The discovery result must still be retrievable via type-filtered list.
+    resp = client.get("/api/runs?type=discovery&limit=1")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == d_id
+    assert items[0]["result"] is not None
+    assert items[0]["result"]["type"] == RUN_TYPE_DISCOVERY
+    assert len(items[0]["result"]["ranked"]) == 1
+    assert items[0]["result"]["ranked"][0]["domain"] == "alpha.example"
+
+
+def test_discovery_result_survives_memory_loss(tmp_path, monkeypatch):
+    """R1-4: after _LATEST_RUN is cleared (simulating process restart), the
+    discovery page can still load the ranked result from the DB."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    d = client.post("/api/runs/discovery?limit=10")
+    d_id = d.json()["id"]
+    _wait_run_done(client, d_id)
+
+    # Simulate process restart: clear in-memory state.
+    api_mod._LATEST_RUN = None
+
+    # Discovery page fetches latest discovery run from DB.
+    resp = client.get("/api/runs?type=discovery&limit=1")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == d_id
+    assert items[0]["result"] is not None
+    assert items[0]["result"]["ranked"][0]["domain"] == "alpha.example"
+
+
+def test_runs_type_filter_works(tmp_path, monkeypatch):
+    """R1-4: the type query parameter filters runs by type."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    d = client.post("/api/runs/discovery?limit=5")
+    _wait_run_done(client, d.json()["id"])
+    p = client.post("/api/runs/process?limit=5")
+    _wait_run_done(client, p.json()["id"])
+
+    disc = client.get("/api/runs?type=discovery")
+    proc = client.get("/api/runs?type=processing")
+    assert all(i["type"] == "discovery" for i in disc.json()["items"])
+    assert all(i["type"] == "processing" for i in proc.json()["items"])
+
+
+def test_dashboard_rebuilds_latest_run_from_db_after_restart(tmp_path, monkeypatch):
+    """R1-8: after _LATEST_RUN is cleared, dashboard still shows the most
+    recent completed run metrics from the persisted row."""
+    _live_mode(tmp_path)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    p = client.post("/api/runs/process?limit=5")
+    _wait_run_done(client, p.json()["id"])
+
+    # Before restart: dashboard has latest_run from memory.
+    dash1 = client.get("/api/dashboard").json()
+    assert dash1["latest_run"] is not None
+
+    # Simulate restart: clear in-memory state.
+    api_mod._LATEST_RUN = None
+
+    # After restart: dashboard rebuilds latest_run from the persisted row.
+    dash2 = client.get("/api/dashboard").json()
+    assert dash2["latest_run"] is not None
+    assert dash2["latest_run"]["type"] == RUN_TYPE_PROCESSING
+    assert dash2["latest_run_row"] is not None
+    assert dash2["latest_run_row"]["status"] == RUN_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# R1-5: Discovery polling contract reaches terminal state
+# ---------------------------------------------------------------------------
+
+
+def test_run_detail_reaches_terminal_state(tmp_path, monkeypatch):
+    """R1-5: polling GET /api/runs/{id} eventually returns completed/failed."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    resp = client.post("/api/runs/discovery?limit=5")
+    run_id = resp.json()["id"]
+    done = _wait_run_done(client, run_id)
+    assert done["status"] in {RUN_COMPLETED, RUN_FAILED}
+    assert done["status"] == RUN_COMPLETED  # this mock succeeds
+
+
+# ---------------------------------------------------------------------------
+# R1-6: Reconcile abandoned runs on startup
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_abandoned_running_run(tmp_path):
+    """R1-6: a persisted running row is marked failed on reconciliation."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.db import reconcile_abandoned_runs
+    run_id = create_run(RUN_TYPE_PROCESSING, requested_limit=5)
+    update_run(run_id, status=RUN_RUNNING)
+
+    count = reconcile_abandoned_runs()
+    assert count == 1
+    row = get_run(run_id)
+    assert row["status"] == RUN_FAILED
+    assert row["completed_at"] is not None
+    assert "Interrupted" in row["error_summary"]
+
+
+def test_reconcile_abandoned_queued_run(tmp_path):
+    """R1-6: a persisted queued row is marked failed on reconciliation."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.db import reconcile_abandoned_runs
+    run_id = create_run(RUN_TYPE_DISCOVERY, requested_limit=5)
+    # status is RUN_QUEUED from create_run
+
+    count = reconcile_abandoned_runs()
+    assert count == 1
+    row = get_run(run_id)
+    assert row["status"] == RUN_FAILED
+
+
+def test_reconcile_does_not_touch_completed_run(tmp_path):
+    """R1-6: completed runs are unchanged by reconciliation."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.db import reconcile_abandoned_runs
+    run_id = create_run(RUN_TYPE_PROCESSING, requested_limit=5)
+    update_run(run_id, status=RUN_COMPLETED, completed_at="2026-09-04T00:00:00+00:00")
+
+    count = reconcile_abandoned_runs()
+    assert count == 0
+    row = get_run(run_id)
+    assert row["status"] == RUN_COMPLETED
+
+
+def test_reconcile_does_not_touch_failed_run(tmp_path):
+    """R1-6: already-failed runs are unchanged by reconciliation."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.db import reconcile_abandoned_runs
+    run_id = create_run(RUN_TYPE_PROCESSING, requested_limit=5)
+    update_run(run_id, status=RUN_FAILED, completed_at="2026-09-04T00:00:00+00:00",
+               error_summary="prior failure")
+
+    count = reconcile_abandoned_runs()
+    assert count == 0
+    row = get_run(run_id)
+    assert row["status"] == RUN_FAILED
+    assert row["error_summary"] == "prior failure"
+
+
+# ---------------------------------------------------------------------------
+# R1-7: _RUN_LOCK exception safety
+# ---------------------------------------------------------------------------
+
+
+def test_run_lock_released_on_create_run_failure(tmp_path, monkeypatch):
+    """R1-7: if create_run fails after the lock is acquired, the lock is
+    released and a subsequent run can acquire it."""
+    _live_mode(tmp_path)
+    client = TestClient(api_mod.app, raise_server_exceptions=False)
+
+    original_create_run = api_mod.create_run
+
+    def failing_create_run(*a, **kw):
+        raise RuntimeError("db is broken")
+
+    monkeypatch.setattr(api_mod, "create_run", failing_create_run)
+
+    resp = client.post("/api/runs/process?limit=1")
+    assert resp.status_code == 500
+
+    # Lock must be released.
+    assert not api_mod._RUN_LOCK.locked()
+
+    # Restore and verify a subsequent run can acquire the lock.
+    monkeypatch.setattr(api_mod, "create_run", original_create_run)
+    _patch_pipeline_success(monkeypatch)
+    resp2 = client.post("/api/runs/process?limit=1")
+    assert resp2.status_code == 200
+    _wait_run_done(client, resp2.json()["id"])
+
+
+def test_run_lock_released_on_thread_start_failure(tmp_path, monkeypatch):
+    """R1-7: if thread.start() fails, the lock is released and the run row
+    is marked failed."""
+    _live_mode(tmp_path)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app, raise_server_exceptions=False)
+
+    import threading as _threading
+    original_thread = _threading.Thread
+
+    class FailingThread(original_thread):
+        def start(self):
+            raise OSError("cannot start thread")
+
+    monkeypatch.setattr(api_mod.threading, "Thread", FailingThread)
+
+    resp = client.post("/api/runs/process?limit=1")
+    assert resp.status_code == 500
+    assert not api_mod._RUN_LOCK.locked()
+
+    # Restore Thread so subsequent tests work.
+    monkeypatch.setattr(api_mod.threading, "Thread", original_thread)

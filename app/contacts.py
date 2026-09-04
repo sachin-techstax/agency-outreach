@@ -82,6 +82,9 @@ def discover_contact(
     pages: list[tuple[str, str]],
     domain: str,
     mailtos: list[tuple[str, str]] | None = None,
+    *,
+    home_text: str | None = None,
+    home_url: str | None = None,
 ) -> dict:
     """Discover the best public contact email from crawled site text + mailtos.
 
@@ -92,12 +95,23 @@ def discover_contact(
     - ``contact_role``: detected role from text, or "" if none found
     - ``contact_quality``: "high", "medium", "low", or "none"
 
-    Emails are collected from visible text on the homepage and every crawled
-    research page, plus ``mailto:`` hrefs collected by the scraper.  Only
-    emails on the company's own domain are accepted; third-party addresses
-    are ignored.  ``mailto:`` values are normalized (prefix and query
-    parameters stripped) and deduplicated against text-derived emails so a
-    single address found in both places is only counted once.
+    Provenance contract (R1-1):
+    - When ``home_text`` and ``home_url`` are provided, the homepage is
+      scanned as its own source using ``home_url`` (e.g.
+      ``https://example.com``) — NOT the synthetic label ``website``.
+    - Each crawled page in ``pages`` is scanned with its own URL as source.
+    - The combined ``text`` argument is NEVER scanned for contact provenance.
+      It is accepted only for backward compatibility and role detection; the
+      real crawler passes ``home_text`` separately so an email that appears
+      on a contact page (and therefore also in the combined text) is
+      correctly attributed to the contact page URL, not the homepage.
+    - ``mailto:`` hrefs in ``mailtos`` carry their own per-page source URL.
+
+    Only emails on the company's own domain are accepted; third-party
+    addresses are ignored.  ``mailto:`` values are normalized (prefix and
+    query parameters stripped) and deduplicated against text-derived emails
+    so a single address found in multiple places is only counted once (the
+    first source wins, with homepage before crawled pages).
     """
     # Collect all emails from the company's own domain.
     # Each entry: (email, source_url).  Source is the page URL where the
@@ -114,8 +128,23 @@ def discover_contact(
         seen.add(e)
         emails.append((e, source))
 
-    # Visible text on the homepage and crawled pages.
-    for source, chunk in [("website", text)] + list(pages):
+    # Build the ordered list of (source_url, visible_text) chunks to scan.
+    # IMPORTANT: the combined `text` is intentionally NOT included so that an
+    # email present on a crawled contact page is attributed to that page's
+    # URL rather than being claimed by the homepage via the combined text.
+    text_chunks: list[tuple[str, str]] = []
+    if home_text is not None and home_url:
+        text_chunks.append((home_url, home_text))
+    elif home_text is None and text:
+        # Backward-compatible path: callers that still pass the combined text
+        # without home_text fall back to scanning it with a generic source.
+        # The real crawler always passes home_text, so this branch is only
+        # reached by older tests/callers.
+        text_chunks.append(("website", text))
+    for source, chunk in list(pages):
+        text_chunks.append((source, chunk))
+
+    for source, chunk in text_chunks:
         for email in EMAIL_RE.findall(chunk):
             _add(email, source)
 
@@ -149,8 +178,11 @@ def discover_contact(
         preferred = (filtered[0][0], filtered[0][1])
         preferred_quality = filtered[0][2]
 
-    # Detect role from text (do not default to "Founder / CTO").
-    lowered = text.lower()
+    # Detect role from text (do not default to "Founder / CTO").  Role
+    # detection uses whatever text is available (combined is fine here —
+    # provenance only applies to contact emails, not role detection).
+    role_text = home_text if home_text is not None else text
+    lowered = role_text.lower()
     role = ""
     for r in DETECTABLE_ROLES:
         if r in lowered:

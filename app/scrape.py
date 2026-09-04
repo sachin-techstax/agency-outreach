@@ -66,12 +66,19 @@ def domain_of(url: str) -> str:
 
 
 def _normalize_url(url: str) -> str:
-    """Strip fragment and trailing slash for stable dedupe."""
+    """Strip fragment, trailing slash AND query string for stable dedupe.
+
+    Query strings are stripped so tracking variants of the same content page
+    (e.g. ``/contact?utm_source=nav`` and ``/contact?utm_source=footer``)
+    do not consume separate bounded crawl slots.  This is intentionally
+    aggressive for research-page *selection*; it does not affect the actual
+    fetched URL, only deduplication.
+    """
     p = urlparse(url)
     path = p.path or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
-    return urlunparse((p.scheme or "https", p.netloc, path, "", p.query, ""))
+    return urlunparse((p.scheme or "https", p.netloc, path, "", "", ""))
 
 
 def score_path(path: str) -> int:
@@ -175,10 +182,15 @@ def crawl_company(url: str) -> dict:
     - ``root``: site root URL
     - ``domain``: canonical domain
     - ``title``: homepage title
-    - ``text``: combined visible text (homepage + crawled pages)
+    - ``home_text``: visible text of the homepage only (used for accurate
+      contact provenance — the homepage URL is the source, not a synthetic
+      ``website`` label)
+    - ``text``: combined visible text (homepage + crawled pages) used for
+      commercial-fit scoring and LLM analysis
     - ``pages``: list of ``(url, text)`` for each crawled research page
-    - ``mailtos``: list of ``(email, source_url)`` collected from the homepage
-      and every crawled page (raw ``mailto:`` values, normalized later)
+    - ``mailtos``: list of ``(raw_mailto, source_url)`` collected from the
+      homepage and every crawled page (raw ``mailto:`` values, normalized
+      later by the contact discovery layer)
     """
     root = root_url(url)
     domain = domain_of(root)
@@ -219,6 +231,7 @@ def crawl_company(url: str) -> dict:
         "root": root,
         "domain": domain,
         "title": title,
+        "home_text": home,
         "text": combined[:30000],
         "pages": pages,
         "mailtos": mailtos,
