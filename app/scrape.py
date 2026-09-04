@@ -107,14 +107,19 @@ def _normalize_url(url: str) -> str:
 def _canonical_fetch_url(url: str) -> str:
     """Return the actual URL to fetch for a given link.
 
-    Strips only the fragment and trailing slash (which are safe to remove for
-    fetching) but PRESERVES the full query string, because query parameters
-    can change page semantics (e.g. ``/contact?form=agency`` vs ``/contact``).
+    Strips ONLY the fragment (which is client-side and never sent in the HTTP
+    request).  PRESERVES the path including any trailing slash, because some
+    applications route ``/contact`` and ``/contact/`` to different resources.
+    Also preserves the full query string, because query parameters can change
+    page semantics (e.g. ``/contact?form=agency`` vs ``/contact``).
+
+    The returned URL must correspond to an actual link that appeared on the
+    page (after fragment removal).  It must NOT synthesize a different
+    resource by stripping trailing slashes or query parameters.
     """
     p = urlparse(url)
     path = p.path or "/"
-    if path != "/" and path.endswith("/"):
-        path = path.rstrip("/")
+    # Intentionally NOT stripping trailing slash — see R3-1.
     return urlunparse((p.scheme or "https", p.netloc, path, "", p.query, ""))
 
 
@@ -192,48 +197,58 @@ def _select_research_pages(root: str, domain: str, hrefs: list[str]) -> list[str
     irrelevant ones, dedupe by normalized URL, then take the top
     ``MAX_EXTRA_PAGES`` by score (descending) with stable URL tie-breaking.
 
-    Returns the CANONICAL FETCH URLs (query strings preserved) so the actual
-    page requested by :func:`fetch_page` is the original link, not a
-    query-stripped variant that could change semantics or 404.  Dedup uses
-    :func:`_normalize_url` (tracking-stripped) as the key so tracking
+    Returns the CANONICAL FETCH URLs (query strings and trailing slashes
+    preserved) so the actual page requested by :func:`fetch_page` is a real
+    link that appeared on the page, not a synthesized variant that could
+    change semantics or 404.  Dedup uses :func:`_normalize_url`
+    (tracking-stripped, slash-normalized) as the key so tracking/slash
     variants do not consume multiple slots.
 
-    When multiple links share the same dedupe key, a query-free URL is
-    preferred if one appeared among the links (e.g. ``/contact`` is
-    preferred over ``/contact?utm_source=nav``).  Otherwise the first-seen
-    variant's URL is used.
+    Representative selection (R3-1): when multiple links share the same
+    dedupe key, a deterministic representative is chosen from among the
+    actual linked URLs.  Preference order:
+      1. Query-free URL (e.g. ``/contact`` preferred over
+         ``/contact?utm_source=nav``).
+      2. No trailing slash (e.g. ``/contact`` preferred over ``/contact/``).
+      3. Shortest URL string (stable tie-break).
+    The chosen URL is always one that actually appeared in the site links
+    (after fragment removal).
     """
     # Group candidates by dedupe key, tracking the best fetch URL for each.
-    # Key: dedupe_key -> (score, fetch_url, has_query)
-    groups: dict[str, tuple[int, str, bool]] = {}
+    # Key: dedupe_key -> (score, fetch_url, has_query, has_trailing_slash)
+    groups: dict[str, tuple[int, str, bool, bool]] = {}
     seen_keys: set[str] = set()
     for href in hrefs:
         absolute = urljoin(root, href)
         if domain_of(absolute) != domain:
             continue
         norm = _normalize_url(absolute)
+        fetch_url = _canonical_fetch_url(absolute)
+        has_q = bool(urlparse(absolute).query)
+        raw_path = urlparse(absolute).path
+        has_slash = raw_path != "/" and raw_path.endswith("/")
         if norm in seen_keys:
-            # Already have a candidate for this key; prefer query-free URL.
+            # Already have a candidate; maybe replace with a better one.
             existing = groups.get(norm)
             if existing is not None:
-                _, existing_url, existing_has_q = existing
-                this_url = _canonical_fetch_url(absolute)
-                this_has_q = bool(urlparse(absolute).query)
-                # Prefer the URL without a query string if the current one
-                # has a query and this one doesn't.
-                if existing_has_q and not this_has_q:
-                    groups[norm] = (existing[0], this_url, False)
+                _, ex_url, ex_q, ex_slash = existing
+                # Prefer query-free; then no trailing slash; then shorter URL.
+                better = (
+                    (ex_q and not has_q) or
+                    (ex_q == has_q and ex_slash and not has_slash) or
+                    (ex_q == has_q and ex_slash == has_slash and len(fetch_url) < len(ex_url))
+                )
+                if better:
+                    groups[norm] = (existing[0], fetch_url, has_q, has_slash)
             continue
         seen_keys.add(norm)
         path = urlparse(absolute).path.lower()
         score = score_path(path)
         if score <= 0:
             continue
-        fetch_url = _canonical_fetch_url(absolute)
-        has_q = bool(urlparse(absolute).query)
-        groups[norm] = (score, fetch_url, has_q)
+        groups[norm] = (score, fetch_url, has_q, has_slash)
 
-    scored = [(score, url) for score, url, _ in groups.values()]
+    scored = [(score, url) for score, url, _, _ in groups.values()]
     # Sort by score desc, then URL asc for deterministic ordering.
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [url for _, url in scored[:MAX_EXTRA_PAGES]]

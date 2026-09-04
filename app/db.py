@@ -532,6 +532,21 @@ def list_runs_by_type_and_status(
         ).fetchall()
 
 
+def list_runs_by_status(status: str, limit: int = 50):
+    """Return recent run rows of a specific status, most-recent first.
+
+    Used by ``GET /api/runs?status=failed`` (R3-2) so a status-only filter
+    does not fall through to the unfiltered list.
+    """
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs WHERE status=? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+
+
 def reconcile_abandoned_runs() -> int:
     """Mark any ``queued`` or ``running`` runs as ``failed``.
 

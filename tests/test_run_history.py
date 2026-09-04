@@ -1176,3 +1176,105 @@ def test_dashboard_survives_memory_loss(tmp_path, monkeypatch):
     assert dash["latest_run"]["type"] == "processing"
     assert dash["latest_run_row"] is not None
     assert dash["latest_run_row"]["status"] == RUN_COMPLETED
+
+
+# ---------------------------------------------------------------------------
+# R3-2: /api/runs status-only filter + filter validation
+# ---------------------------------------------------------------------------
+
+
+def test_runs_status_only_filter(tmp_path, monkeypatch):
+    """R3-2: GET /api/runs?status=failed returns only failed runs."""
+    _live_mode(tmp_path)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    # Create a completed run.
+    ok = client.post("/api/runs/process?limit=1")
+    _wait_run_done(client, ok.json()["id"])
+
+    # Create a failed run.
+    def failing(limit, progress_cb=None):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(api_mod, "run_pipeline", failing)
+    bad = client.post("/api/runs/process?limit=1")
+    _wait_run_done(client, bad.json()["id"])
+
+    # Status-only filter: only failed runs.
+    resp = client.get("/api/runs?status=failed")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert all(i["status"] == "failed" for i in items)
+    assert any(i["id"] == bad.json()["id"] for i in items)
+    assert not any(i["id"] == ok.json()["id"] for i in items)
+
+
+def test_runs_type_only_filter(tmp_path, monkeypatch):
+    """R3-2: GET /api/runs?type=discovery returns only discovery runs."""
+    _live_mode(tmp_path)
+    _patch_discovery_success(monkeypatch)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    d = client.post("/api/runs/discovery?limit=1")
+    _wait_run_done(client, d.json()["id"])
+    p = client.post("/api/runs/process?limit=1")
+    _wait_run_done(client, p.json()["id"])
+
+    resp = client.get("/api/runs?type=discovery")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert all(i["type"] == "discovery" for i in items)
+
+
+def test_runs_type_and_status_filter(tmp_path, monkeypatch):
+    """R3-2: GET /api/runs?type=discovery&status=completed returns only
+    completed discovery runs."""
+    _live_mode(tmp_path)
+    _patch_discovery_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    d = client.post("/api/runs/discovery?limit=1")
+    _wait_run_done(client, d.json()["id"])
+
+    resp = client.get("/api/runs?type=discovery&status=completed")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert all(i["type"] == "discovery" for i in items)
+    assert all(i["status"] == "completed" for i in items)
+
+
+def test_runs_no_filter_returns_all(tmp_path, monkeypatch):
+    """R3-2: no filters returns recent runs of all types/statuses."""
+    _live_mode(tmp_path)
+    _patch_discovery_success(monkeypatch)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    d = client.post("/api/runs/discovery?limit=1")
+    _wait_run_done(client, d.json()["id"])
+    p = client.post("/api/runs/process?limit=1")
+    _wait_run_done(client, p.json()["id"])
+
+    resp = client.get("/api/runs")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    types = {i["type"] for i in items}
+    assert "discovery" in types
+    assert "processing" in types
+
+
+def test_runs_invalid_status_returns_422(tmp_path):
+    """R3-2: invalid status value returns a 422 validation error."""
+    _live_mode(tmp_path)
+    client = TestClient(api_mod.app)
+    resp = client.get("/api/runs?status=banana")
+    assert resp.status_code == 422
+
+
+def test_runs_invalid_type_returns_422(tmp_path):
+    """R3-2: invalid type value returns a 422 validation error."""
+    _live_mode(tmp_path)
+    client = TestClient(api_mod.app)
+    resp = client.get("/api/runs?type=banana")
+    assert resp.status_code == 422

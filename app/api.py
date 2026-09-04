@@ -10,6 +10,7 @@ from typing import Any, Callable
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from typing import Literal
 from fastapi.staticfiles import StaticFiles
 
 from .auth import validate_auth_config, valid_api_token
@@ -32,6 +33,7 @@ from .db import (
     list_runs,
     list_runs_by_type,
     list_runs_by_type_and_status,
+    list_runs_by_status,
     now_iso,
     reconcile_abandoned_runs,
     set_run_progress,
@@ -611,14 +613,16 @@ def run_outreach(limit: int = Query(default=10, ge=1, le=50)) -> dict:
 @app.get("/api/runs")
 def runs(
     limit: int = Query(default=50, ge=1, le=200),
-    type: str | None = Query(default=None),
-    status: str | None = Query(default=None),
+    type: Literal["discovery", "processing"] | None = Query(default=None),
+    status: Literal["queued", "running", "completed", "failed"] | None = Query(default=None),
 ) -> dict:
     """List recent persistent run rows (most recent first).
 
     Optional ``type`` filter (``discovery`` or ``processing``) restricts the
     list to a single run type.  Optional ``status`` filter (``queued``,
-    ``running``, ``completed``, ``failed``) restricts by run status.
+    ``running``, ``completed``, ``failed``) restricts by run status.  Both
+    filters may be combined.  Invalid values for either parameter return a
+    clear ``422`` validation error (R3-2).
 
     Used by the Discovery page to retrieve the most recent *completed*
     discovery run (``?type=discovery&status=completed&limit=1``) so a later
@@ -631,6 +635,8 @@ def runs(
         rows = [_serialize_run(r) for r in list_runs_by_type_and_status(type, status, limit=limit)]
     elif type:
         rows = [_serialize_run(r) for r in list_runs_by_type(type, limit=limit)]
+    elif status:
+        rows = [_serialize_run(r) for r in list_runs_by_status(status, limit=limit)]
     else:
         rows = [_serialize_run(r) for r in list_runs(limit=limit)]
     return {"items": rows, "total": len(rows)}

@@ -3,6 +3,7 @@ mailto extraction, provenance, dedupe and crawl-page prioritization."""
 from __future__ import annotations
 
 from app.contacts import discover_contact
+from app.scrape import _canonical_fetch_url as _canonical_fetch_url_of
 from app.scrape import _select_research_pages, score_path
 
 
@@ -387,6 +388,92 @@ def test_select_research_pages_meaningful_query_not_deduped():
     selected = _select_research_pages(root, DOMAIN, hrefs)
     # Both should remain as separate targets (different meaningful params).
     assert len(selected) == 2
+
+
+# ---------------------------------------------------------------------------
+# R3-1: Fetch URL must preserve the actual linked path, including trailing slash
+# ---------------------------------------------------------------------------
+
+def test_trailing_slash_preserved_when_only_linked_variant():
+    # R3-1 Case A: only /contact/ exists — fetch URL must be /contact/,
+    # NOT /contact.
+    root = "https://company.com"
+    hrefs = ["/contact/"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    assert selected[0] == "https://company.com/contact/"
+
+
+def test_fragment_removed_without_removing_trailing_slash():
+    # R3-1 Case B: only /contact/#team exists — fragment stripped, trailing
+    # slash remains.
+    root = "https://company.com"
+    hrefs = ["/contact/#team"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    assert selected[0] == "https://company.com/contact/"
+
+
+def test_meaningful_query_and_trailing_slash_preserved():
+    # R3-1 Case D: only /contact/?form=agency exists — both query and
+    # trailing slash preserved.
+    root = "https://company.com"
+    hrefs = ["/contact/?form=agency"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    assert selected[0] == "https://company.com/contact/?form=agency"
+
+
+def test_contact_and_contact_slash_dedupe_to_one_slot():
+    # R3-1 Case C: both /contact and /contact/ exist — they dedupe to one
+    # bounded slot.  The no-slash variant is preferred as the representative.
+    root = "https://company.com"
+    hrefs = ["/contact", "/contact/"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    # No-slash preferred over slash.
+    assert selected[0] == "https://company.com/contact"
+
+
+def test_tracking_variants_with_trailing_slash_preserve_real_url():
+    # R3-1 Case E: /contact/?utm_source=nav and /contact/?utm_source=footer
+    # dedupe to one target.  The selected URL must correspond to an actual
+    # linked variant (after fragment removal), preserving trailing slash.
+    root = "https://company.com"
+    hrefs = [
+        "/contact/?utm_source=nav",
+        "/contact/?utm_source=footer",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    # The fetch URL must be one of the actual links, with trailing slash
+    # and query preserved.
+    assert selected[0].startswith("https://company.com/contact/?utm_source=")
+    assert selected[0] in [
+        "https://company.com/contact/?utm_source=nav",
+        "https://company.com/contact/?utm_source=footer",
+    ]
+
+
+def test_fetch_url_always_corresponds_to_actual_link():
+    # R3-1: the selected fetch URL must always be one that appeared in the
+    # site links (after fragment removal).  Verify with a mix of variants.
+    root = "https://company.com"
+    hrefs = [
+        "/about/",
+        "/about#team",
+        "/services",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    # Each selected URL must be the canonical fetch URL of one of the
+    # actual hrefs (fragment removed, path + query preserved).
+    actual_canonical = {
+        _canonical_fetch_url_of("https://company.com/about/"),
+        _canonical_fetch_url_of("https://company.com/about#team"),
+        _canonical_fetch_url_of("https://company.com/services"),
+    }
+    for url in selected:
+        assert url in actual_canonical
 
 
 def test_select_research_pages_ignores_other_domains():
