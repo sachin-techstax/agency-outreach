@@ -195,7 +195,9 @@ def test_process_run_persists_completed_summary(tmp_path, monkeypatch):
     resp = client.post("/api/runs/process?limit=5")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == RUN_RUNNING
+    # The background thread may complete before the response returns
+    # (especially on fast hardware), so accept either running or completed.
+    assert body["status"] in (RUN_RUNNING, RUN_COMPLETED)
     run_id = body["id"]
 
     done = _wait_run_done(client, run_id)

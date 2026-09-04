@@ -18,7 +18,7 @@ from .db import (
     get_suppressed_domains,
 )
 from .discovery_priority import DiscoveryPriority, score_discovery_priority
-from .llm import analyze_agency, draft_outreach
+from .llm import analyze_agency, draft_outreach, OUTREACH_COPY_VERSION
 from .logging_config import get_logger
 from .scrape import crawl_company, domain_of, root_url
 from .search import (
@@ -568,7 +568,15 @@ def run(
             outreach_drafts_generated += 1
             # R1-4: A newly generated draft is fresh against the research
             # that generated it.  Explicitly clear stale state.
-            update_lead(lead_id, subject=subject, draft=body, status="drafted", draft_stale=0)
+            # R1-5: Stamp the current outreach copy version.
+            update_lead(
+                lead_id,
+                subject=subject,
+                draft=body,
+                status="drafted",
+                draft_stale=0,
+                draft_copy_version=OUTREACH_COPY_VERSION,
+            )
             drafted += 1
             logger.info("Draft created for %s", domain)
             processed += 1
@@ -988,12 +996,15 @@ def regenerate_draft(lead_id: int) -> dict:
     # (potentially slow) draft_outreach() / OpenAI call.  The conditional
     # UPDATE after the call will fail if any of these fields changed,
     # preventing TOCTOU races.
+    # R1-7: draft_copy_version is included in the snapshot so that a
+    # concurrent version change also produces a conflict.
     snapshot_status = status
     snapshot_draft = draft_body
     snapshot_company = company
     snapshot_fit_reason = fit_reason
     snapshot_proof_project = proof_project
     snapshot_outreach_angle = outreach_angle
+    snapshot_draft_copy_version = existing["draft_copy_version"] if "draft_copy_version" in existing.keys() else None
 
     # R1-11: Only draft_outreach() is called.  No Gmail, Serper, or
     # analyze_agency calls.
@@ -1004,6 +1015,7 @@ def regenerate_draft(lead_id: int) -> dict:
     # concurrent workflow action (do-not-contact, Gmail draft, etc.) or a
     # research refresh changed any draft-driving field, the update affects
     # zero rows and we return a controlled 409 conflict.
+    # R1-6: Stamps draft_copy_version with the current OUTREACH_COPY_VERSION.
     from .db import replace_stale_draft_if_current
     updated = replace_stale_draft_if_current(
         lead_id,
@@ -1013,8 +1025,10 @@ def regenerate_draft(lead_id: int) -> dict:
         expected_fit_reason=snapshot_fit_reason,
         expected_proof_project=snapshot_proof_project,
         expected_outreach_angle=snapshot_outreach_angle,
+        expected_draft_copy_version=snapshot_draft_copy_version,
         subject=subject,
         draft=body,
+        copy_version=OUTREACH_COPY_VERSION,
     )
 
     # R2-2: If the conditional update failed, do NOT overwrite newer state.
