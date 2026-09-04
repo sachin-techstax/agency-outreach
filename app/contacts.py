@@ -178,10 +178,14 @@ def discover_contact(
         preferred = (filtered[0][0], filtered[0][1])
         preferred_quality = filtered[0][2]
 
-    # Detect role from text (do not default to "Founder / CTO").  Role
-    # detection uses whatever text is available (combined is fine here —
-    # provenance only applies to contact emails, not role detection).
-    role_text = home_text if home_text is not None else text
+    # Detect role from the FULL combined research text (R2-2).  Role detection
+    # and email provenance are separate concerns: email provenance uses
+    # page-specific chunks only, but role detection should see the combined
+    # text so roles found on /about, /team, /leadership, etc. are not missed
+    # when the homepage doesn't mention them.  We include ``text`` (which the
+    # real crawler fills with homepage + crawled page text) plus any page
+    # texts explicitly, in case ``text`` was truncated.
+    role_text = text + " " + " ".join(chunk for _, chunk in pages)
     lowered = role_text.lower()
     role = ""
     for r in DETECTABLE_ROLES:

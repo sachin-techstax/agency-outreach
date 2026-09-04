@@ -514,6 +514,24 @@ def list_runs_by_type(run_type: str, limit: int = 50):
         ).fetchall()
 
 
+def list_runs_by_type_and_status(
+    run_type: str, status: str, limit: int = 50
+):
+    """Return recent run rows of a specific type AND status, most-recent first.
+
+    Used by the Discovery page to retrieve the most recent *completed*
+    discovery run so a later failed attempt does not hide the last
+    successful ranked result (R2-3).
+    """
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs WHERE type=? AND status=? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (run_type, status, limit),
+        ).fetchall()
+
+
 def reconcile_abandoned_runs() -> int:
     """Mark any ``queued`` or ``running`` runs as ``failed``.
 

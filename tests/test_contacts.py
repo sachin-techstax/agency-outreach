@@ -305,8 +305,9 @@ def test_select_research_pages_dedupes_normalized_urls():
 
 
 def test_select_research_pages_dedupes_query_variants():
-    # R1-2: tracking query variants of the same content page must not consume
-    # separate bounded crawl slots.
+    # R1-2/R2-1: tracking query variants of the same content page must not
+    # consume separate bounded crawl slots.  The query-free URL is preferred
+    # when it appears among the links.
     root = "https://company.com"
     hrefs = [
         "/contact",
@@ -314,12 +315,78 @@ def test_select_research_pages_dedupes_query_variants():
         "/contact#team",
         "/contact?utm_source=nav",
         "/contact?utm_source=footer",
-        "/contact?utm_source=nav&campaign=launch",
+        "/contact?utm_source=nav&utm_campaign=launch",
     ]
     selected = _select_research_pages(root, DOMAIN, hrefs)
     # Only one contact research target should remain after normalization.
-    assert selected.count("https://company.com/contact") == 1
     assert len(selected) == 1
+    # The query-free /contact appeared first, so that's the fetch URL.
+    assert selected[0] == "https://company.com/contact"
+
+
+def test_select_research_pages_preserves_meaningful_query_in_fetch_url():
+    # R2-1 Case A: a meaningful query parameter must be preserved in the
+    # fetched URL.  Only tracking params are stripped for dedup.
+    root = "https://company.com"
+    hrefs = ["/contact?form=agency"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    assert selected[0] == "https://company.com/contact?form=agency"
+
+
+def test_select_research_pages_prefers_query_free_url():
+    # R2-1 Case B: when both /contact and /contact?utm_source=nav appear,
+    # the clean /contact URL is preferred as the fetch URL.
+    root = "https://company.com"
+    hrefs = [
+        "/contact?utm_source=nav",
+        "/contact",
+        "/contact?utm_source=footer",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    # The query-free URL is preferred even though it appeared second.
+    assert selected[0] == "https://company.com/contact"
+
+
+def test_select_research_pages_preserves_meaningful_query_with_tracking():
+    # R2-1 Case C: tracking param is ignored for dedupe, but meaningful
+    # form=agency must remain in the fetched URL.
+    root = "https://company.com"
+    hrefs = ["/contact?form=agency&utm_source=nav"]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    # The fetch URL preserves ALL query params (including tracking), but
+    # the dedupe key strips tracking.  Since only one variant exists, the
+    # fetch URL is the original with all params.
+    assert "form=agency" in selected[0]
+
+
+def test_select_research_pages_dedupes_fragment_and_slash_variants():
+    # R2-1 Case D: fragments and trailing-slash variants dedupe safely.
+    root = "https://company.com"
+    hrefs = [
+        "/contact",
+        "/contact/",
+        "/contact#section",
+        "/contact/#team",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    assert len(selected) == 1
+    assert selected[0] == "https://company.com/contact"
+
+
+def test_select_research_pages_meaningful_query_not_deduped():
+    # Two different meaningful query params should NOT dedupe — they may
+    # be different pages.
+    root = "https://company.com"
+    hrefs = [
+        "/contact?form=agency",
+        "/contact?form=partner",
+    ]
+    selected = _select_research_pages(root, DOMAIN, hrefs)
+    # Both should remain as separate targets (different meaningful params).
+    assert len(selected) == 2
 
 
 def test_select_research_pages_ignores_other_domains():
@@ -412,7 +479,8 @@ def test_integration_homepage_email_provenance_is_home_url():
 
 
 def test_integration_query_variants_do_not_consume_multiple_slots():
-    # Case D: tracking-query duplicates must not consume multiple crawl slots.
+    # R2-1 Case D: tracking-query duplicates must not consume multiple crawl
+    # slots.  The query-free URL is preferred when present.
     root = "https://example.com"
     hrefs = [
         "/contact",
@@ -427,3 +495,53 @@ def test_integration_query_variants_do_not_consume_multiple_slots():
     contact_targets = [u for u in selected if "/contact" in u]
     assert len(contact_targets) == 1
     assert contact_targets[0] == "https://example.com/contact"
+
+
+# ---------------------------------------------------------------------------
+# R2-2: Role detection across combined research text
+# ---------------------------------------------------------------------------
+
+def test_role_detected_from_about_team_page():
+    # Homepage has no role mention. About/team page mentions CTO.
+    # Combined research text contains the about page.
+    # Expected: contact_role detects CTO from the combined text.
+    # At the same time, email provenance must remain the contact page URL.
+    home_text = "Welcome to Company. We build AI solutions."
+    about_text = "Our CTO leads engineering delivery and oversees all technical projects."
+    contact_text = "Email us at hello@company.com for inquiries."
+    combined = home_text + "\n" + about_text + "\n" + contact_text
+    pages = [
+        ("https://company.com/about", about_text),
+        ("https://company.com/contact", contact_text),
+    ]
+    result = discover_contact(
+        combined, pages, DOMAIN, [],
+        home_text=home_text, home_url=HOME_URL,
+    )
+    # Role detected from the about page via combined text.
+    assert result["contact_role"] == "Cto" or result["contact_role"].lower() == "cto"
+    # Email provenance is still the contact page, not corrupted by role detection.
+    assert result["contact_email"] == "hello@company.com"
+    assert result["contact_source"] == "https://company.com/contact"
+
+
+def test_role_detection_does_not_corrupt_email_provenance():
+    # Role found on /team page, email found on /contact page.
+    # Both are in combined text. Provenance must be contact page URL.
+    home_text = "Welcome to Company."
+    team_text = "Our founder and CEO started the company in 2018."
+    contact_text = "Reach us at partnerships@company.com."
+    combined = home_text + "\n" + team_text + "\n" + contact_text
+    pages = [
+        ("https://company.com/team", team_text),
+        ("https://company.com/contact", contact_text),
+    ]
+    result = discover_contact(
+        combined, pages, DOMAIN, [],
+        home_text=home_text, home_url=HOME_URL,
+    )
+    # Role detected from team page.
+    assert result["contact_role"] != ""
+    # Email provenance is the contact page.
+    assert result["contact_email"] == "partnerships@company.com"
+    assert result["contact_source"] == "https://company.com/contact"

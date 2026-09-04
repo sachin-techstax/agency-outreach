@@ -31,6 +31,7 @@ from .db import (
     list_leads,
     list_runs,
     list_runs_by_type,
+    list_runs_by_type_and_status,
     now_iso,
     reconcile_abandoned_runs,
     set_run_progress,
@@ -163,6 +164,29 @@ def _run_exclusive(fn):
         _RUN_LOCK.release()
 
 
+def _sanitize_error_summary(exc: Exception) -> str:
+    """Build a bounded, sanitized failure classification for persistence.
+
+    R2-4: Raw exception messages can contain URLs, query parameters, headers,
+    credentials, tokens, or provider payload fragments.  We persist ONLY the
+    exception class name (and an HTTP status code when available from httpx),
+    never the raw ``str(exc)``.  Detailed tracebacks remain in server logs
+    via the logger; they must NOT be persisted in ``runs.error_summary`` or
+    returned in API responses.
+
+    Examples:
+      - ``ConnectTimeout`` → ``"Run failed: ConnectTimeout"``
+      - ``HTTPStatusError`` with 429 → ``"Run failed: HTTP 429"``
+      - ``RuntimeError`` → ``"Run failed: RuntimeError"``
+    """
+    exc_name = type(exc).__name__
+    # Extract HTTP status code from httpx HTTPStatusError if available.
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code is not None:
+        return f"Run failed: HTTP {status_code}"
+    return f"Run failed: {exc_name}"
+
+
 def _sanitize_result_for_storage(run_type: str, result: dict) -> dict:
     """Build a sanitized result snapshot safe to persist in ``result_json``.
 
@@ -287,7 +311,11 @@ def _start_background_run(
                 update_run(run_id, **summary_fields)
                 _LATEST_RUN = {"type": run_type, **result}
             except Exception as exc:
-                error_summary = f"{type(exc).__name__}: {exc}"[:500]
+                # R2-4: persist only a sanitized classification — never the
+                # raw exception message, which could contain secrets.  The
+                # full traceback goes to server logs only.
+                error_summary = _sanitize_error_summary(exc)
+                logger.warning("Run %s failed: %s", run_id, type(exc).__name__)
                 update_run(
                     run_id,
                     status=RUN_FAILED,
@@ -368,17 +396,24 @@ def dashboard() -> dict:
     queue_statuses = {"drafted", "approved", "qualified", "discovered"}
     review_queue = [row for row in rows if row["status"] in queue_statuses][:6]
 
-    # Surface the most recent run row so the UI can show real persisted state
-    # (status, started_at, type) instead of only the in-memory latest run.
-    # R1-8: the persisted row is authoritative.  When ``_LATEST_RUN`` is empty
-    # (e.g. after a process restart) but a completed run exists in the DB,
-    # rebuild the latest-run payload from the persisted ``result_json`` so the
-    # Dashboard still shows the most recent completed run metrics.
+    # R2-5: The persisted run row is AUTHORITATIVE for the Dashboard.  The
+    # in-memory ``_LATEST_RUN`` is NOT used to override persisted DB state —
+    # it may be stale or contradictory.  The Dashboard's ``latest_run`` payload
+    # is always rebuilt from the most recent persisted run row's ``result_json``
+    # so the UI reflects the DB, not process memory.  ``_LATEST_RUN`` remains
+    # only for internal/logging/CLI backward compatibility.
     recent_runs = list_runs(limit=1)
     latest_run_row = _serialize_run(recent_runs[0]) if recent_runs else None
-    latest_run = _LATEST_RUN
-    if latest_run is None and latest_run_row and latest_run_row.get("result"):
+    latest_run = None
+    if latest_run_row and latest_run_row.get("result"):
         latest_run = latest_run_row["result"]
+    elif latest_run_row and latest_run_row.get("status") == RUN_FAILED:
+        # A failed run has no result_json; surface a minimal payload so the
+        # UI can show the failure status.
+        latest_run = {
+            "type": latest_run_row["type"],
+            "error": latest_run_row.get("error_summary") or "Run failed",
+        }
 
     return {
         "mode": "private",
@@ -577,18 +612,24 @@ def run_outreach(limit: int = Query(default=10, ge=1, le=50)) -> dict:
 def runs(
     limit: int = Query(default=50, ge=1, le=200),
     type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
 ) -> dict:
     """List recent persistent run rows (most recent first).
 
     Optional ``type`` filter (``discovery`` or ``processing``) restricts the
-    list to a single run type.  Used by the Discovery page to retrieve the
-    most recent persisted discovery run independent of ``_LATEST_RUN``
-    (R1-4).
+    list to a single run type.  Optional ``status`` filter (``queued``,
+    ``running``, ``completed``, ``failed``) restricts by run status.
+
+    Used by the Discovery page to retrieve the most recent *completed*
+    discovery run (``?type=discovery&status=completed&limit=1``) so a later
+    failed attempt does not hide the last successful ranked result (R2-3).
     """
     if settings.pactsignal_demo_mode:
         return {"items": [], "total": 0}
     init_db()
-    if type:
+    if type and status:
+        rows = [_serialize_run(r) for r in list_runs_by_type_and_status(type, status, limit=limit)]
+    elif type:
         rows = [_serialize_run(r) for r in list_runs_by_type(type, limit=limit)]
     else:
         rows = [_serialize_run(r) for r in list_runs(limit=limit)]

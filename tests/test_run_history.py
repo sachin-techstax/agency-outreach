@@ -6,6 +6,7 @@ network calls are made.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -285,7 +286,10 @@ def test_failed_run_persisted_with_error_summary(tmp_path, monkeypatch):
     done = _wait_run_done(client, run_id)
     assert done["status"] == RUN_FAILED
     assert done["error_summary"] is not None
-    assert "pipeline exploded" in done["error_summary"]
+    # R2-4: error_summary is a sanitized classification, NOT the raw message.
+    assert "RuntimeError" in done["error_summary"]
+    # The raw exception message must NOT be persisted.
+    assert "pipeline exploded" not in done["error_summary"]
 
 
 def test_get_runs_lists_recent_rows(tmp_path, monkeypatch):
@@ -964,3 +968,211 @@ def test_run_lock_released_on_thread_start_failure(tmp_path, monkeypatch):
 
     # Restore Thread so subsequent tests work.
     monkeypatch.setattr(api_mod.threading, "Thread", original_thread)
+
+
+# ---------------------------------------------------------------------------
+# R2-3: Failed discovery must not hide last successful discovery result
+# ---------------------------------------------------------------------------
+
+
+def test_failed_discovery_does_not_hide_successful_result(tmp_path, monkeypatch):
+    """R2-3: a failed discovery run after a successful one must not hide the
+    successful ranked result from the Discovery page."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    # Run A: successful discovery with ranked candidates.
+    a = client.post("/api/runs/discovery?limit=10")
+    a_id = a.json()["id"]
+    _wait_run_done(client, a_id)
+
+    # Run B: failed discovery.
+    def failing_discover(limit, progress_cb=None):
+        raise RuntimeError("serper is down")
+
+    monkeypatch.setattr(api_mod, "discover_only", failing_discover)
+    b = client.post("/api/runs/discovery?limit=10")
+    b_id = b.json()["id"]
+    _wait_run_done(client, b_id)
+
+    # Latest attempt is B (failed).
+    latest = client.get("/api/runs?type=discovery&limit=1")
+    assert latest.json()["items"][0]["id"] == b_id
+    assert latest.json()["items"][0]["status"] == RUN_FAILED
+
+    # Latest SUCCESSFUL discovery is still A with ranked candidates.
+    successful = client.get("/api/runs?type=discovery&status=completed&limit=1")
+    assert successful.json()["items"][0]["id"] == a_id
+    assert successful.json()["items"][0]["result"] is not None
+    assert successful.json()["items"][0]["result"]["ranked"][0]["domain"] == "alpha.example"
+
+
+def test_later_successful_discovery_replaces_previous(tmp_path, monkeypatch):
+    """R2-3: a later successful discovery becomes the displayed result."""
+    _live_mode(tmp_path)
+    _patch_discovery_with_ranked(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    # Run A: successful.
+    a = client.post("/api/runs/discovery?limit=10")
+    a_id = a.json()["id"]
+    _wait_run_done(client, a_id)
+
+    # Run C: later successful discovery with different ranked data.
+    def fake_discover_2(limit, progress_cb=None):
+        return {
+            "query_count": 5,
+            "search_results_total": 50,
+            "raw_candidate_domains": 40,
+            "rejected_candidate_domains": 5,
+            "candidate_domains": 35,
+            "ranked_candidate_domains": 35,
+            "displayed_candidate_domains": min(limit, 35),
+            "candidate_priority_avg": 55.0,
+            "per_query": [{"query": "ai", "hits": 20}],
+            "ranked": [
+                {"rank": 1, "domain": "beta.example", "priority": 95,
+                 "reasons": "strong", "category": "ai", "source_query": "ai",
+                 "title": "Beta", "url": "https://beta.example"},
+            ],
+            "attempted": 0, "processed": 0, "qualified": 0, "drafted": 0,
+            "below_score": 0, "no_contact": 0, "skipped": 0, "failed": 0,
+            "duration_s": 0.5, "fresh_retryable_pool": 35,
+        }
+    monkeypatch.setattr(api_mod, "discover_only", fake_discover_2)
+    c = client.post("/api/runs/discovery?limit=10")
+    c_id = c.json()["id"]
+    _wait_run_done(client, c_id)
+
+    # Latest successful is now C, not A.
+    successful = client.get("/api/runs?type=discovery&status=completed&limit=1")
+    assert successful.json()["items"][0]["id"] == c_id
+    assert successful.json()["items"][0]["result"]["ranked"][0]["domain"] == "beta.example"
+
+
+# ---------------------------------------------------------------------------
+# R2-4: Do not persist arbitrary exception messages
+# ---------------------------------------------------------------------------
+
+
+def test_exception_secret_not_persisted(tmp_path, monkeypatch):
+    """R2-4: a fake secret in an exception message must NOT appear in
+    error_summary, API responses, or result_json."""
+    _live_mode(tmp_path)
+    fake_secret = "sk-test-super-secret-value"
+
+    def failing_run(limit, progress_cb=None):
+        raise RuntimeError(f"auth failed with key={fake_secret}")
+
+    monkeypatch.setattr(api_mod, "run_pipeline", failing_run)
+    client = TestClient(api_mod.app)
+
+    resp = client.post("/api/runs/process?limit=1")
+    run_id = resp.json()["id"]
+    done = _wait_run_done(client, run_id)
+
+    assert done["status"] == RUN_FAILED
+    assert done["error_summary"] is not None
+    assert fake_secret not in done["error_summary"]
+    assert "RuntimeError" in done["error_summary"]
+    # result_json should not contain the secret either.
+    result_str = str(done.get("result") or "")
+    assert fake_secret not in result_str
+
+
+def test_exception_secret_not_in_api_response(tmp_path, monkeypatch):
+    """R2-4: the full run detail API response must not leak the secret."""
+    _live_mode(tmp_path)
+    fake_secret = "sk-test-super-secret-value"
+
+    def failing_run(limit, progress_cb=None):
+        raise ValueError(f"bad token: {fake_secret}")
+
+    monkeypatch.setattr(api_mod, "run_pipeline", failing_run)
+    client = TestClient(api_mod.app)
+
+    resp = client.post("/api/runs/process?limit=1")
+    run_id = resp.json()["id"]
+    _wait_run_done(client, run_id)
+
+    detail = client.get(f"/api/runs/{run_id}")
+    body_str = json.dumps(detail.json())
+    assert fake_secret not in body_str
+
+
+def test_http_error_classification(tmp_path, monkeypatch):
+    """R2-4: httpx HTTPStatusError is classified as 'HTTP <status>'."""
+    _live_mode(tmp_path)
+    import httpx
+
+    def failing_run(limit, progress_cb=None):
+        # Simulate an httpx HTTP error with a 429 status.
+        request = httpx.Request("GET", "https://api.serper.dev/search")
+        response = httpx.Response(429, request=request)
+        raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    monkeypatch.setattr(api_mod, "run_pipeline", failing_run)
+    client = TestClient(api_mod.app)
+
+    resp = client.post("/api/runs/process?limit=1")
+    run_id = resp.json()["id"]
+    done = _wait_run_done(client, run_id)
+
+    assert done["status"] == RUN_FAILED
+    assert "HTTP 429" in done["error_summary"]
+    # Raw exception text must not be persisted.
+    assert "rate limited" not in done["error_summary"]
+
+
+# ---------------------------------------------------------------------------
+# R2-5: Dashboard persisted-state authority
+# ---------------------------------------------------------------------------
+
+
+def test_dashboard_ignores_stale_latest_run(tmp_path, monkeypatch):
+    """R2-5: Dashboard must reflect persisted DB state, not stale _LATEST_RUN."""
+    _live_mode(tmp_path)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    # Run a processing run to completion.
+    p = client.post("/api/runs/process?limit=5")
+    _wait_run_done(client, p.json()["id"])
+
+    # Get the persisted metrics.
+    dash1 = client.get("/api/dashboard").json()
+    assert dash1["latest_run"] is not None
+    persisted_attempted = dash1["latest_run"].get("attempted")
+
+    # Set _LATEST_RUN to contradictory/stale values.
+    api_mod._LATEST_RUN = {
+        "type": "processing",
+        "attempted": persisted_attempted + 999 if persisted_attempted else 999,
+        "drafted": 777,
+    }
+
+    # Dashboard must reflect persisted values, NOT stale _LATEST_RUN.
+    dash2 = client.get("/api/dashboard").json()
+    assert dash2["latest_run"] is not None
+    assert dash2["latest_run"].get("attempted") == persisted_attempted
+    assert dash2["latest_run"].get("drafted") != 777
+
+
+def test_dashboard_survives_memory_loss(tmp_path, monkeypatch):
+    """R2-5: after _LATEST_RUN is cleared, Dashboard still shows metrics from DB."""
+    _live_mode(tmp_path)
+    _patch_pipeline_success(monkeypatch)
+    client = TestClient(api_mod.app)
+
+    p = client.post("/api/runs/process?limit=5")
+    _wait_run_done(client, p.json()["id"])
+
+    # Simulate process restart.
+    api_mod._LATEST_RUN = None
+
+    dash = client.get("/api/dashboard").json()
+    assert dash["latest_run"] is not None
+    assert dash["latest_run"]["type"] == "processing"
+    assert dash["latest_run_row"] is not None
+    assert dash["latest_run_row"]["status"] == RUN_COMPLETED

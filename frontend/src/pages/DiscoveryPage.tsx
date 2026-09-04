@@ -14,12 +14,20 @@ export function DiscoveryPage() {
   const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
   const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard, refetchInterval: 5000 });
 
-  // R1-4: The Discovery page uses the most recent PERSISTED discovery run as
-  // its source of truth — not dashboard.latest_run (which is overwritten when
-  // a processing run executes).  This survives processing runs and container
-  // restarts.
-  const discoveryRuns = useQuery({
-    queryKey: ["runs", "discovery"],
+  // R1-4/R2-3: The Discovery page uses the most recent PERSISTED COMPLETED
+  // discovery run as its source of truth — not dashboard.latest_run (which
+  // is overwritten when a processing run executes) and not the latest attempt
+  // (which may have failed).  This survives processing runs, container
+  // restarts, and failed discovery attempts.
+  const successfulDiscovery = useQuery({
+    queryKey: ["runs", "discovery", "completed"],
+    queryFn: () => api.runsByTypeAndStatus("discovery", "completed", 1),
+  });
+
+  // R2-3: Also fetch the latest discovery attempt (any status) so the UI can
+  // show "Latest attempt: Failed" alongside the last successful result.
+  const latestDiscoveryAttempt = useQuery({
+    queryKey: ["runs", "discovery", "latest"],
     queryFn: () => api.runsByType("discovery", 1),
   });
 
@@ -29,10 +37,15 @@ export function DiscoveryPage() {
 
   const demoMode = Boolean(meta.data?.demo_mode);
 
-  // The latest persisted discovery run row (with result_json parsed).
-  const latestDiscoveryRow = discoveryRuns.data?.items?.[0] ?? null;
+  // The latest persisted COMPLETED discovery run row (with result_json parsed).
+  const latestDiscoveryRow = successfulDiscovery.data?.items?.[0] ?? null;
   const discoveryResult: DiscoveryResult | null =
     latestDiscoveryRow?.result ?? null;
+
+  // R2-3: Latest attempt (any status) for status display.
+  const latestAttempt = latestDiscoveryAttempt.data?.items?.[0] ?? null;
+  const latestAttemptFailed = latestAttempt?.status === "failed" &&
+    latestAttempt?.id !== latestDiscoveryRow?.id;
 
   // R1-5: Poll the active run until it reaches a terminal state.
   // When a run is started (discovery or processing), poll its specific row
@@ -56,7 +69,8 @@ export function DiscoveryPage() {
   useEffect(() => {
     if (activeRun.data && (activeRun.data.status === "completed" || activeRun.data.status === "failed")) {
       setActiveRunId(null);
-      queryClient.invalidateQueries({ queryKey: ["runs", "discovery"] });
+      queryClient.invalidateQueries({ queryKey: ["runs", "discovery", "completed"] });
+      queryClient.invalidateQueries({ queryKey: ["runs", "discovery", "latest"] });
       queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     }
@@ -142,6 +156,11 @@ export function DiscoveryPage() {
               <strong>Run in progress</strong>
               <span>Polling for completion…</span>
             </div>
+          </div>
+        )}
+        {latestAttemptFailed && !runActive && (
+          <div className="error-banner">
+            Latest discovery attempt failed. Showing the last successful result below.
           </div>
         )}
 

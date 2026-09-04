@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qsl, urlencode
 
 import httpx
 from bs4 import BeautifulSoup
@@ -65,20 +65,57 @@ def domain_of(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def _normalize_url(url: str) -> str:
-    """Strip fragment, trailing slash AND query string for stable dedupe.
+# Tracking-only query parameters that should be stripped for deduplication
+# but do not change page content.  These are well-known analytics/marketing
+# tracking params; meaningful params like ``form=agency`` are preserved.
+_TRACKING_PARAMS = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "gclid", "fbclid", "msclkid", "mc_eid", "mc_cid",
+})
 
-    Query strings are stripped so tracking variants of the same content page
-    (e.g. ``/contact?utm_source=nav`` and ``/contact?utm_source=footer``)
-    do not consume separate bounded crawl slots.  This is intentionally
-    aggressive for research-page *selection*; it does not affect the actual
-    fetched URL, only deduplication.
+
+def _strip_tracking_params(query: str) -> str:
+    """Remove tracking-only parameters from a query string, preserving
+    meaningful parameters.  Returns the cleaned query string (may be empty)."""
+    if not query:
+        return ""
+    pairs = parse_qsl(query, keep_blank_values=True)
+    kept = [(k, v) for k, v in pairs if k.lower() not in _TRACKING_PARAMS]
+    return urlencode(kept)
+
+
+def _normalize_url(url: str) -> str:
+    """Return a canonical dedupe key for a URL.
+
+    Strips fragment, trailing slash, and tracking-only query parameters
+    (utm_*, gclid, fbclid, etc.) so tracking variants of the same content
+    page collapse to one dedupe key.  Meaningful query parameters (e.g.
+    ``form=agency``) are PRESERVED in the key so semantically different
+    pages are not incorrectly merged.
+
+    This is a DEDUPE KEY only — it must NOT be used as the actual fetch URL.
+    Use :func:`_canonical_fetch_url` for the URL to actually request.
     """
     p = urlparse(url)
     path = p.path or "/"
     if path != "/" and path.endswith("/"):
         path = path.rstrip("/")
-    return urlunparse((p.scheme or "https", p.netloc, path, "", "", ""))
+    cleaned_query = _strip_tracking_params(p.query)
+    return urlunparse((p.scheme or "https", p.netloc, path, "", cleaned_query, ""))
+
+
+def _canonical_fetch_url(url: str) -> str:
+    """Return the actual URL to fetch for a given link.
+
+    Strips only the fragment and trailing slash (which are safe to remove for
+    fetching) but PRESERVES the full query string, because query parameters
+    can change page semantics (e.g. ``/contact?form=agency`` vs ``/contact``).
+    """
+    p = urlparse(url)
+    path = p.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+    return urlunparse((p.scheme or "https", p.netloc, path, "", p.query, ""))
 
 
 def score_path(path: str) -> int:
@@ -154,22 +191,49 @@ def _select_research_pages(root: str, domain: str, hrefs: list[str]) -> list[str
     Deterministic: score every same-domain link by path keywords, drop
     irrelevant ones, dedupe by normalized URL, then take the top
     ``MAX_EXTRA_PAGES`` by score (descending) with stable URL tie-breaking.
+
+    Returns the CANONICAL FETCH URLs (query strings preserved) so the actual
+    page requested by :func:`fetch_page` is the original link, not a
+    query-stripped variant that could change semantics or 404.  Dedup uses
+    :func:`_normalize_url` (tracking-stripped) as the key so tracking
+    variants do not consume multiple slots.
+
+    When multiple links share the same dedupe key, a query-free URL is
+    preferred if one appeared among the links (e.g. ``/contact`` is
+    preferred over ``/contact?utm_source=nav``).  Otherwise the first-seen
+    variant's URL is used.
     """
-    scored: list[tuple[int, str]] = []
-    seen: set[str] = set()
+    # Group candidates by dedupe key, tracking the best fetch URL for each.
+    # Key: dedupe_key -> (score, fetch_url, has_query)
+    groups: dict[str, tuple[int, str, bool]] = {}
+    seen_keys: set[str] = set()
     for href in hrefs:
         absolute = urljoin(root, href)
         if domain_of(absolute) != domain:
             continue
         norm = _normalize_url(absolute)
-        if norm in seen:
+        if norm in seen_keys:
+            # Already have a candidate for this key; prefer query-free URL.
+            existing = groups.get(norm)
+            if existing is not None:
+                _, existing_url, existing_has_q = existing
+                this_url = _canonical_fetch_url(absolute)
+                this_has_q = bool(urlparse(absolute).query)
+                # Prefer the URL without a query string if the current one
+                # has a query and this one doesn't.
+                if existing_has_q and not this_has_q:
+                    groups[norm] = (existing[0], this_url, False)
             continue
-        seen.add(norm)
+        seen_keys.add(norm)
         path = urlparse(absolute).path.lower()
         score = score_path(path)
         if score <= 0:
             continue
-        scored.append((score, norm))
+        fetch_url = _canonical_fetch_url(absolute)
+        has_q = bool(urlparse(absolute).query)
+        groups[norm] = (score, fetch_url, has_q)
+
+    scored = [(score, url) for score, url, _ in groups.values()]
     # Sort by score desc, then URL asc for deterministic ordering.
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [url for _, url in scored[:MAX_EXTRA_PAGES]]

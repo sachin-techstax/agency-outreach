@@ -75,6 +75,8 @@ export const api = {
   runs: (limit = 50) => request<RunList>(`/api/runs?limit=${limit}`),
   runsByType: (type: string, limit = 50) =>
     request<RunList>(`/api/runs?type=${type}&limit=${limit}`),
+  runsByTypeAndStatus: (type: string, status: string, limit = 50) =>
+    request<RunList>(`/api/runs?type=${type}&status=${status}&limit=${limit}`),
   run: (id: number) => request<RunRow>(`/api/runs/${id}`),
   followups: () => request<FollowupList>("/api/followups")
 };
