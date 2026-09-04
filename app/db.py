@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS leads (
     status TEXT NOT NULL DEFAULT 'discovered',
     gmail_draft_id TEXT,
     draft_stale INTEGER DEFAULT 0,
+    draft_copy_version TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_contact_at TEXT,
@@ -176,6 +177,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 _MIGRATION_COLUMNS = [
     ("contact_quality", "TEXT"),
     ("draft_stale", "INTEGER DEFAULT 0"),
+    ("draft_copy_version", "TEXT"),
 ]
 
 # Columns to add to the ``runs`` table if missing in older database files.
@@ -196,6 +198,13 @@ def _migrate(db: sqlite3.Connection) -> None:
     Rows in ``gmail_drafted``, ``sent``, or ``do_not_contact`` are NOT
     marked stale by migration — those represent workflow states where
     regeneration is not the expected next step.
+
+    R1-3/R1-4: When ``draft_copy_version`` is first added, existing
+    reviewable drafts predate the V2 outreach-generation policy.  They are
+    marked stale so the operator is offered regeneration under the new
+    capability-led prompt.  Their version is left as NULL (legacy).
+    ``gmail_drafted``, ``sent``, and ``do_not_contact`` rows are NOT
+    marked stale by this migration.
     """
     cols = {row["name"] for row in db.execute("PRAGMA table_info(leads)").fetchall()}
     for col_name, col_type in _MIGRATION_COLUMNS:
@@ -214,6 +223,20 @@ def _migrate(db: sqlite3.Connection) -> None:
                 logger.info(
                     "Migration: marked existing regeneratable drafts stale "
                     "(draft_stale=1 for drafted/rejected/approved with non-empty draft)"
+                )
+            # R1-3/R1-4: When draft_copy_version is first added, mark
+            # existing reviewable drafts stale because they predate V2.
+            # Their version stays NULL (legacy).  Protected workflow
+            # states are excluded.
+            if col_name == "draft_copy_version":
+                db.execute(
+                    "UPDATE leads SET draft_stale = 1 "
+                    "WHERE COALESCE(draft, '') <> '' "
+                    "AND status IN ('drafted', 'rejected', 'approved')"
+                )
+                logger.info(
+                    "Migration: marked existing reviewable drafts stale for "
+                    "V2 copy upgrade (draft_copy_version column added)"
                 )
     run_cols = {row["name"] for row in db.execute("PRAGMA table_info(runs)").fetchall()}
     for col_name, col_type in _RUN_MIGRATION_COLUMNS:
@@ -370,8 +393,10 @@ def replace_stale_draft_if_current(
     expected_fit_reason: str,
     expected_proof_project: str,
     expected_outreach_angle: str,
+    expected_draft_copy_version: str | None,
     subject: str,
     draft: str,
+    copy_version: str,
 ) -> bool:
     """R2-1: Optimistic-concurrency conditional update for draft regeneration.
 
@@ -390,9 +415,12 @@ def replace_stale_draft_if_current(
       - ``company``, ``fit_reason``, ``proof_project``, ``outreach_angle``
         are unchanged (no concurrent research refresh changed draft-driving
         fields)
+      - ``draft_copy_version`` matches the snapshot (R1-7)
 
     Contact fields, score, summary, and services are intentionally NOT
     checked because they do not affect the generated draft.
+
+    On success, stamps ``draft_copy_version`` with ``copy_version`` (R1-6).
 
     Returns ``True`` if exactly one row was updated, ``False`` on conflict.
     """
@@ -406,6 +434,7 @@ def replace_stale_draft_if_current(
                 draft = ?,
                 draft_stale = 0,
                 status = 'drafted',
+                draft_copy_version = ?,
                 updated_at = ?
             WHERE id = ?
               AND status = ?
@@ -416,10 +445,12 @@ def replace_stale_draft_if_current(
               AND COALESCE(fit_reason, '') = ?
               AND COALESCE(proof_project, '') = ?
               AND COALESCE(outreach_angle, '') = ?
+              AND COALESCE(draft_copy_version, '') = ?
             """,
             (
                 subject,
                 draft,
+                copy_version,
                 timestamp,
                 lead_id,
                 expected_status,
@@ -428,6 +459,7 @@ def replace_stale_draft_if_current(
                 expected_fit_reason,
                 expected_proof_project,
                 expected_outreach_angle,
+                expected_draft_copy_version or "",
             ),
         )
         updated = cur.rowcount == 1

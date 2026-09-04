@@ -512,3 +512,505 @@ def test_no_automatic_send_behavior_introduced():
     assert "create_draft" not in source
     assert "send" not in source.lower()
     assert "gmail" not in source.lower()
+
+
+# ---------------------------------------------------------------------------
+# R1-1 / R1-2: Case-insensitive normalized private project detection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("variant", [
+    "Forge Crew",
+    "forge crew",
+    "FORGE CREW",
+    "Forge-Crew",
+    "Forge   Crew",
+    "Forge.Crew",
+    "Forge_Crew",
+])
+def test_forge_crew_variants_detected(variant):
+    """All case/separator variants of Forge Crew must be detected."""
+    result = llm_mod._contains_forbidden_project(variant)
+    assert result is not None
+    assert result == "Forge Crew"
+
+
+@pytest.mark.parametrize("variant", [
+    "Aegis",
+    "aegis",
+    "AEGIS",
+    "Aegis-Review",
+    "aegis code review",
+])
+def test_aegis_variants_detected(variant):
+    """All case/separator variants of Aegis must be detected."""
+    result = llm_mod._contains_forbidden_project(variant)
+    assert result is not None
+    assert result == "Aegis"
+
+
+def test_forbidden_variant_in_subject_triggers_retry(monkeypatch):
+    """A forbidden variant in the subject triggers the corrective retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "forge crew support for your team",
+        "body": "I build agentic systems and can help.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I build agentic systems and can help when delivery is tight.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("TestCo", "fit", "Forge Crew", "angle")
+    assert "forge crew" not in subject.lower()
+    assert client.responses.create.call_count == 2
+
+
+def test_forbidden_variant_in_body_triggers_retry(monkeypatch):
+    """A forbidden variant in the body triggers the corrective retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "FORGE CREW is a great orchestrator for your agency.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I build agentic systems and can help when delivery is tight.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("TestCo", "fit", "Forge Crew", "angle")
+    assert "forge crew" not in body.lower()
+    assert client.responses.create.call_count == 2
+
+
+def test_successful_corrected_retry_accepted(monkeypatch):
+    """A retry that removes all forbidden variants is accepted."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "AEGIS review for you",
+        "body": "aegis can help your team with code review.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Overflow AI engineering",
+        "body": "I build agentic systems and can help when delivery is tight.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("TestCo", "fit", "Aegis", "angle")
+    assert "aegis" not in subject.lower()
+    assert "aegis" not in body.lower()
+    assert client.responses.create.call_count == 2
+
+
+def test_second_unsafe_response_uses_fallback(monkeypatch):
+    """If the retry still contains a forbidden variant, use safe fallback."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Forge-Crew for you",
+        "body": "Forge Crew orchestrator is great.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "AEGIS review",
+        "body": "aegis code review agent.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("TestCo", "fit", "Forge Crew", "angle")
+    assert "forge crew" not in subject.lower()
+    assert "aegis" not in subject.lower()
+    assert "forge crew" not in body.lower()
+    assert "aegis" not in body.lower()
+    assert subject == "Extra AI delivery capacity"
+
+
+def test_corrective_retry_provider_exception_uses_fallback(monkeypatch):
+    """R1-10: If the corrective retry raises, use the safe fallback."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Forge Crew support",
+        "body": "Forge Crew is a great orchestrator.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, RuntimeError("provider timeout")]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("TestCo", "fit", "Forge Crew", "angle")
+    # Fallback used — no forbidden names.
+    assert "forge crew" not in subject.lower()
+    assert "forge crew" not in body.lower()
+    assert subject == "Extra AI delivery capacity"
+    assert "senior" in body.lower()
+
+
+def test_fallback_contains_no_private_project_names():
+    """The deterministic fallback must never contain private project names."""
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "angle")
+    for name in llm_mod._FORBIDDEN_NAMES:
+        canonical_name = llm_mod._canonical_project_text(name)
+        canonical_body = llm_mod._canonical_project_text(body)
+        assert canonical_name not in canonical_body
+
+
+# ---------------------------------------------------------------------------
+# R1-3 / R1-4 / R1-13: Draft copy versioning
+# ---------------------------------------------------------------------------
+
+def test_outreach_copy_version_constant():
+    """OUTREACH_COPY_VERSION is defined and stable."""
+    assert llm_mod.OUTREACH_COPY_VERSION == "v2"
+
+
+def test_migration_adds_draft_copy_version(tmp_path):
+    """The migration adds the draft_copy_version column."""
+    import sqlite3
+    from app.db import init_db, SCHEMA
+    from app.config import settings as cfg
+
+    db_path = tmp_path / "test.db"
+    object.__setattr__(cfg, "db_path", db_path)
+
+    # Create a DB without draft_copy_version by creating with old schema.
+    db = sqlite3.connect(str(db_path))
+    db.executescript("""
+    CREATE TABLE leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company TEXT NOT NULL,
+        domain TEXT NOT NULL UNIQUE,
+        website TEXT NOT NULL,
+        source_query TEXT,
+        source_url TEXT,
+        summary TEXT,
+        services TEXT,
+        team_hint TEXT,
+        score INTEGER DEFAULT 0,
+        score_reasons TEXT,
+        fit_reason TEXT,
+        proof_project TEXT,
+        outreach_angle TEXT,
+        contact_name TEXT,
+        contact_role TEXT,
+        contact_email TEXT,
+        contact_source TEXT,
+        contact_quality TEXT,
+        subject TEXT,
+        draft TEXT,
+        status TEXT NOT NULL DEFAULT 'discovered',
+        gmail_draft_id TEXT,
+        draft_stale INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_contact_at TEXT,
+        followup_due_at TEXT
+    );
+    """)
+    db.close()
+
+    # Run migration.
+    init_db()
+
+    db = sqlite3.connect(str(db_path))
+    db.row_factory = sqlite3.Row
+    cols = {row["name"] for row in db.execute("PRAGMA table_info(leads)").fetchall()}
+    db.close()
+    assert "draft_copy_version" in cols
+
+
+def _create_pre_v2_db(tmp_path, status, draft="Old draft body", subject="Old subject"):
+    """Create a DB with a pre-V2 lead (no draft_copy_version column)."""
+    import sqlite3
+    from app.config import settings as cfg
+
+    db_path = tmp_path / "test.db"
+    object.__setattr__(cfg, "db_path", db_path)
+
+    db = sqlite3.connect(str(db_path))
+    db.executescript("""
+    CREATE TABLE leads (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company TEXT NOT NULL,
+        domain TEXT NOT NULL UNIQUE,
+        website TEXT NOT NULL,
+        source_query TEXT,
+        source_url TEXT,
+        summary TEXT,
+        services TEXT,
+        team_hint TEXT,
+        score INTEGER DEFAULT 0,
+        score_reasons TEXT,
+        fit_reason TEXT,
+        proof_project TEXT,
+        outreach_angle TEXT,
+        contact_name TEXT,
+        contact_role TEXT,
+        contact_email TEXT,
+        contact_source TEXT,
+        contact_quality TEXT,
+        subject TEXT,
+        draft TEXT,
+        status TEXT NOT NULL DEFAULT 'discovered',
+        gmail_draft_id TEXT,
+        draft_stale INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_contact_at TEXT,
+        followup_due_at TEXT
+    );
+    """)
+    db.execute(
+        "INSERT INTO leads (company, domain, website, fit_reason, proof_project, "
+        "outreach_angle, subject, draft, status, draft_stale, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("TestCo", "test.example.com", "https://test.example.com", "fit", "WingerX",
+         "angle", subject, draft, status, 0, "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z")
+    )
+    db.commit()
+    db.close()
+    return db_path
+
+
+def test_pre_v2_drafted_lead_becomes_stale_after_migration(tmp_path):
+    """R1-4: Pre-V2 drafted lead with draft becomes stale after migration."""
+    from app.db import init_db, get_lead
+    from app.config import settings as cfg
+
+    _create_pre_v2_db(tmp_path, "drafted")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is True
+    assert lead["draft_copy_version"] is None  # legacy
+
+
+def test_pre_v2_rejected_lead_becomes_stale_after_migration(tmp_path):
+    """R1-4: Pre-V2 rejected lead with draft becomes stale after migration."""
+    from app.db import init_db, get_lead
+
+    _create_pre_v2_db(tmp_path, "rejected")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is True
+
+
+def test_pre_v2_approved_lead_becomes_stale_after_migration(tmp_path):
+    """R1-4: Pre-V2 approved lead with draft becomes stale after migration."""
+    from app.db import init_db, get_lead
+
+    _create_pre_v2_db(tmp_path, "approved")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is True
+
+
+def test_gmail_drafted_lead_not_migration_staled(tmp_path):
+    """R1-4: gmail_drafted lead is NOT staled by the V2 migration."""
+    from app.db import init_db, get_lead
+
+    _create_pre_v2_db(tmp_path, "gmail_drafted")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+
+
+def test_sent_lead_not_migration_staled(tmp_path):
+    """R1-4: sent lead is NOT staled by the V2 migration."""
+    from app.db import init_db, get_lead
+
+    _create_pre_v2_db(tmp_path, "sent")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+
+
+def test_do_not_contact_lead_not_migration_staled(tmp_path):
+    """R1-4: do_not_contact lead is NOT staled by the V2 migration."""
+    from app.db import init_db, get_lead
+
+    _create_pre_v2_db(tmp_path, "do_not_contact")
+    init_db()
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+
+
+def test_migration_is_idempotent(tmp_path):
+    """R1-4: Running init_db() again does not re-stale V2-regenerated drafts."""
+    from app.db import init_db, get_lead, update_lead
+    from app.llm import OUTREACH_COPY_VERSION
+
+    _create_pre_v2_db(tmp_path, "drafted")
+    init_db()
+
+    # Simulate V2 regeneration: clear stale, stamp version.
+    update_lead(1, draft_stale=0, draft_copy_version=OUTREACH_COPY_VERSION)
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+    assert lead["draft_copy_version"] == OUTREACH_COPY_VERSION
+
+    # Run init_db() again — must NOT re-stale.
+    init_db()
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+    assert lead["draft_copy_version"] == OUTREACH_COPY_VERSION
+
+
+def test_v2_regenerated_draft_remains_fresh_after_init_db(tmp_path):
+    """R1-4: A V2-regenerated draft remains fresh after a later init_db()."""
+    from app.db import init_db, get_lead, update_lead
+    from app.llm import OUTREACH_COPY_VERSION
+
+    _create_pre_v2_db(tmp_path, "drafted")
+    init_db()
+
+    update_lead(1, draft_stale=0, draft_copy_version=OUTREACH_COPY_VERSION,
+                subject="V2 subject", draft="V2 body", status="drafted")
+    init_db()  # re-run
+
+    lead = get_lead(1)
+    assert bool(lead["draft_stale"]) is False
+    assert lead["draft_copy_version"] == OUTREACH_COPY_VERSION
+
+
+# ---------------------------------------------------------------------------
+# R1-5 / R1-6: Version stamping in pipeline and regeneration
+# ---------------------------------------------------------------------------
+
+def test_normal_pipeline_stamps_current_copy_version(tmp_path, monkeypatch):
+    """R1-5: Normal pipeline generation stamps draft_copy_version = v2."""
+    from app.db import init_db, upsert_lead, get_lead
+    import tests.test_run_history as trh
+
+    trh._live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(trh._stale_lead(status="drafted"))
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+
+    lead = get_lead(lead_id)
+    assert lead["draft_copy_version"] == llm_mod.OUTREACH_COPY_VERSION
+
+
+def test_explicit_regeneration_stamps_current_copy_version(tmp_path, monkeypatch):
+    """R1-6: Explicit regeneration stamps draft_copy_version = v2."""
+    from app.db import init_db, upsert_lead, get_lead
+    import tests.test_run_history as trh
+
+    trh._live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(trh._stale_lead(status="rejected"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    lead = get_lead(lead_id)
+    assert lead["draft_copy_version"] == llm_mod.OUTREACH_COPY_VERSION
+    assert lead["status"] == "drafted"
+    assert bool(lead["draft_stale"]) is False
+
+
+def test_optimistic_concurrency_with_version_remains_correct(tmp_path, monkeypatch):
+    """R1-7: Optimistic concurrency still works with draft_copy_version in snapshot."""
+    from app.db import init_db, upsert_lead, get_lead, update_lead
+    from app.pipeline import regenerate_draft, RegenerationBlocked
+    import tests.test_run_history as trh
+
+    trh._live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(trh._stale_lead(status="drafted"))
+
+    def mutate():
+        update_lead(lead_id, status="do_not_contact")
+
+    def fake_draft(*a):
+        mutate()
+        return ("Concurrent subject", "Concurrent body")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fake_draft)
+
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+
+    lead = get_lead(lead_id)
+    assert lead["status"] == "do_not_contact"
+    assert bool(lead["draft_stale"]) is True
+
+
+# ---------------------------------------------------------------------------
+# R1-15: Fallback quality tests
+# ---------------------------------------------------------------------------
+
+def test_fallback_uses_company_name():
+    body = llm_mod._capability_fallback_body("LaunchPad Lab", "fit", "AI agents")
+    assert "LaunchPad Lab" in body
+
+
+def test_fallback_uses_usable_outreach_angle():
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents and client delivery")
+    assert "AI agents and client delivery" in body
+
+
+def test_fallback_remains_concise():
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents")
+    word_count = len(body.split())
+    assert word_count <= 80
+
+
+def test_fallback_contains_easy_reply_question():
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents")
+    assert "?" in body
+    assert "Do you ever" in body
+
+
+def test_fallback_contains_no_forge_crew_variant():
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents")
+    canonical_body = llm_mod._canonical_project_text(body)
+    assert "forge crew" not in canonical_body
+
+
+def test_fallback_contains_no_aegis_variant():
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents")
+    canonical_body = llm_mod._canonical_project_text(body)
+    assert "aegis" not in canonical_body
+
+
+def test_empty_angle_yields_safe_generic_fallback():
+    """When the angle is empty, the fallback uses a generic safe sentence."""
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "")
+    assert "TestCo" in body
+    assert "senior" in body.lower()
+    # No angle-specific text since angle was empty.
+    assert "around" not in body.lower()
+
+
+def test_fallback_long_angle_is_truncated():
+    """A very long angle is truncated to keep the email concise."""
+    long_angle = " ".join(["word"] * 50)
+    body = llm_mod._capability_fallback_body("TestCo", "fit", long_angle)
+    # The angle should be truncated — not all 50 words present.
+    assert body.count("word") < 50

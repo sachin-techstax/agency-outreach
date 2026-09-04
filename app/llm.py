@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 
 from openai import OpenAI
@@ -9,6 +10,22 @@ from .config import settings
 from .logging_config import get_logger
 
 logger = get_logger("llm")
+
+# ---------------------------------------------------------------------------
+# Outreach copy versioning
+# ---------------------------------------------------------------------------
+#
+# ``OUTREACH_COPY_VERSION`` identifies the outreach-generation policy that
+# produced a draft.  When the prompt strategy changes materially (as in V2),
+# existing drafts stamped with a prior version (or NULL for pre-versioning
+# drafts) are marked stale by the migration so the operator is offered
+# regeneration under the new policy.
+#
+# This constant is the single source of truth — pipeline and regeneration
+# both import it rather than duplicating string literals.
+# ---------------------------------------------------------------------------
+
+OUTREACH_COPY_VERSION = "v2"
 
 # ---------------------------------------------------------------------------
 # Portfolio metadata
@@ -63,6 +80,29 @@ _FORBIDDEN_NAMES = [
 ]
 
 
+def _canonical_project_text(value: str) -> str:
+    """Canonicalize text for robust project-name matching.
+
+    Strategy (deterministic, no fuzzy/semantic matching):
+      - lowercase
+      - replace non-alphanumeric separators with spaces
+      - collapse repeated whitespace
+      - trim
+    """
+    if not value:
+        return ""
+    lowered = value.lower()
+    # Replace any run of non-alphanumeric characters with a single space.
+    replaced = re.sub(r"[^a-z0-9]+", " ", lowered)
+    return re.sub(r"\s+", " ", replaced).strip()
+
+
+# Pre-computed canonical forms of forbidden names for robust matching.
+_FORBIDDEN_CANONICAL = {
+    _canonical_project_text(name): name for name in _FORBIDDEN_NAMES
+}
+
+
 def _client() -> OpenAI | None:
     if not settings.openai_api_key:
         return None
@@ -70,14 +110,18 @@ def _client() -> OpenAI | None:
 
 
 def _contains_forbidden_project(text: str) -> str | None:
-    """Return the forbidden project name found in *text*, or ``None``.
+    """Return the original forbidden project name found in *text*, or ``None``.
 
-    Case-sensitive exact-name match.  We intentionally do not use substring
-    fuzzing to avoid false positives on common words.
+    R1-1: Matching is case-insensitive and separator-normalized so that
+    variants such as ``forge crew``, ``FORGE CREW``, ``Forge-Crew``, and
+    ``Forge   Crew`` are all detected.  No fuzzy/semantic matching is used.
     """
-    for name in _FORBIDDEN_NAMES:
-        if name in text:
-            return name
+    if not text:
+        return None
+    canonical_text = _canonical_project_text(text)
+    for canonical_name, original_name in _FORBIDDEN_CANONICAL.items():
+        if canonical_name in canonical_text:
+            return original_name
     return None
 
 
@@ -86,17 +130,42 @@ def _capability_fallback_subject(company: str) -> str:
     return "Extra AI delivery capacity"
 
 
+def _sanitize_angle(angle: str, max_words: int = 12) -> str:
+    """Sanitize and truncate an outreach angle for use in fallback copy.
+
+    Keeps it short, grounded, and free of fabricated claims.  Strips
+    trailing punctuation and limits to ``max_words`` words.
+    """
+    if not angle:
+        return ""
+    cleaned = angle.strip().rstrip(".").strip()
+    if not cleaned:
+        return ""
+    words = cleaned.split()
+    if len(words) > max_words:
+        words = words[:max_words]
+    return " ".join(words)
+
+
 def _capability_fallback_body(
     company: str, fit_reason: str, outreach_angle: str
 ) -> str:
     """Deterministic capability-led fallback body.
 
+    R1-9: Uses the supplied grounded outreach angle when available to make
+    the email prospect-specific.  Falls back to a generic safe sentence when
+    the angle is empty or unusable.
+
     Never names a non-public project.  Positions the sender as senior AI
     engineering capacity, not as a software vendor.
     """
-    angle = outreach_angle.rstrip(".").strip()
+    angle = _sanitize_angle(outreach_angle)
+    if angle:
+        hook = f"{company}'s work around {angle} looks close to the kind of AI delivery I handle."
+    else:
+        hook = f"{company}'s work looks close to the kind of AI projects I build day to day."
     return (
-        f"{company}'s work looks close to the kind of AI projects I build day to day. "
+        f"{hook} "
         f"I work across agentic systems, RAG, automation and production AI backends, "
         f"and can plug in as senior overflow or white-label engineering capacity when "
         f"a team gets stretched. Do you ever bring in external AI engineers for client "
@@ -332,11 +401,22 @@ def draft_outreach(company: str, fit_reason: str, proof_project: str, outreach_a
             company, fit_reason, proof_project, outreach_angle,
             corrective=corrective,
         )
+        # R1-10: If the corrective retry itself fails (provider exception,
+        # network error, etc.), fall back to the safe deterministic copy
+        # rather than failing the entire lead.  The first output was already
+        # rejected as unsafe, so we must NOT persist it.  Log the retry
+        # failure without exposing secret-bearing exception content.
         try:
             retry_resp = client.responses.create(model=settings.openai_model, input=retry_prompt)
         except Exception as exc:
-            logger.error("LLM outreach retry failed for %s: %s", company, exc)
-            raise
+            logger.warning(
+                "Outreach corrective retry failed for %s (%s); "
+                "using capability-led fallback",
+                company, type(exc).__name__,
+            )
+            subject = _capability_fallback_subject(company)
+            body = _capability_fallback_body(company, fit_reason, outreach_angle)
+            return subject, body
         retry_raw = retry_resp.output_text.strip()
         subject, body = _parse_outreach_json(retry_raw, company)
         logger.info("Outreach retry generated for %s", company)
