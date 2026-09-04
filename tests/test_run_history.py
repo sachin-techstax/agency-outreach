@@ -1708,3 +1708,172 @@ def test_api_refresh_does_not_leak_exception_message(tmp_path, monkeypatch):
     body_str = json.dumps(resp.json())
     assert fake_secret not in body_str
     assert "RuntimeError" in body_str
+
+
+# ---------------------------------------------------------------------------
+# R1-1: Production migration marks existing regeneratable drafts stale
+# ---------------------------------------------------------------------------
+
+
+def test_migration_marks_existing_drafted_drafts_stale(tmp_path):
+    """R1-1: when draft_stale column is first added, existing drafts in
+    'drafted' status are marked stale."""
+    db_path = _live_mode(tmp_path)
+    from app.db import now_iso
+
+    # Create a database WITHOUT the draft_stale column by inserting leads
+    # directly into a fresh DB (init_db adds the column via migration).
+    # To simulate a pre-migration database, we create the table manually
+    # without draft_stale, insert rows, then call init_db to trigger migration.
+    import sqlite3
+    db = sqlite3.connect(str(db_path))
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS leads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            company TEXT NOT NULL,
+            domain TEXT NOT NULL UNIQUE,
+            website TEXT NOT NULL,
+            source_query TEXT,
+            source_url TEXT,
+            summary TEXT,
+            services TEXT,
+            team_hint TEXT,
+            score INTEGER DEFAULT 0,
+            score_reasons TEXT,
+            fit_reason TEXT,
+            proof_project TEXT,
+            outreach_angle TEXT,
+            contact_name TEXT,
+            contact_role TEXT,
+            contact_email TEXT,
+            contact_source TEXT,
+            contact_quality TEXT,
+            subject TEXT,
+            draft TEXT,
+            status TEXT NOT NULL DEFAULT 'discovered',
+            gmail_draft_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_contact_at TEXT,
+            followup_due_at TEXT
+        );
+    """)
+    now = now_iso()
+    # Drafted lead with a draft — should be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, created_at, updated_at) "
+        "VALUES ('Co A', 'a.example', 'https://a.example', 80, 'Aegis', "
+        "'Subject A', 'Draft A', 'drafted', ?, ?)",
+        (now, now),
+    )
+    # Rejected lead with a draft — should be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, created_at, updated_at) "
+        "VALUES ('Co B', 'b.example', 'https://b.example', 70, 'WingerX', "
+        "'Subject B', 'Draft B', 'rejected', ?, ?)",
+        (now, now),
+    )
+    # Approved lead with a draft — should be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, created_at, updated_at) "
+        "VALUES ('Co C', 'c.example', 'https://c.example', 75, 'Forge Crew', "
+        "'Subject C', 'Draft C', 'approved', ?, ?)",
+        (now, now),
+    )
+    # gmail_drafted lead with a draft — should NOT be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, gmail_draft_id, created_at, updated_at) "
+        "VALUES ('Co D', 'd.example', 'https://d.example', 85, 'WingerX', "
+        "'Subject D', 'Draft D', 'gmail_drafted', 'gmail-123', ?, ?)",
+        (now, now),
+    )
+    # sent lead with a draft — should NOT be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, last_contact_at, created_at, updated_at) "
+        "VALUES ('Co E', 'e.example', 'https://e.example', 90, 'WingerX', "
+        "'Subject E', 'Draft E', 'sent', ?, ?, ?)",
+        (now, now, now),
+    )
+    # do_not_contact lead with a draft — should NOT be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, proof_project, "
+        "subject, draft, status, created_at, updated_at) "
+        "VALUES ('Co F', 'f.example', 'https://f.example', 60, 'WingerX', "
+        "'Subject F', 'Draft F', 'do_not_contact', ?, ?)",
+        (now, now),
+    )
+    # Discovered lead with NO draft — should NOT be marked stale.
+    db.execute(
+        "INSERT INTO leads (company, domain, website, score, "
+        "status, created_at, updated_at) "
+        "VALUES ('Co G', 'g.example', 'https://g.example', 50, "
+        "'discovered', ?, ?)",
+        (now, now),
+    )
+    db.commit()
+    db.close()
+
+    # Now trigger migration by calling init_db.
+    init_db()
+
+    # Verify migration marked the right rows stale.
+    from app.db import get_lead_by_domain
+    drafted = get_lead_by_domain("a.example")
+    assert bool(drafted["draft_stale"]) is True
+
+    rejected = get_lead_by_domain("b.example")
+    assert bool(rejected["draft_stale"]) is True
+
+    approved = get_lead_by_domain("c.example")
+    assert bool(approved["draft_stale"]) is True
+
+    gmail_drafted = get_lead_by_domain("d.example")
+    assert bool(gmail_drafted["draft_stale"]) is False
+
+    sent = get_lead_by_domain("e.example")
+    assert bool(sent["draft_stale"]) is False
+
+    dnc = get_lead_by_domain("f.example")
+    assert bool(dnc["draft_stale"]) is False
+
+    no_draft = get_lead_by_domain("g.example")
+    assert bool(no_draft["draft_stale"]) is False
+
+
+def test_migration_idempotent_does_not_remark_stale(tmp_path):
+    """R1-1: running migration again on an already-migrated DB must NOT
+    re-mark rows stale (e.g. a draft that was explicitly regenerated and
+    cleared must stay clear)."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.db import update_lead
+
+    # Insert a drafted lead with a draft.
+    lead_id = upsert_lead({
+        "company": "Co",
+        "domain": "co.example",
+        "website": "https://co.example",
+        "score": 80,
+        "proof_project": "WingerX",
+        "subject": "Subject",
+        "draft": "Draft",
+        "status": "drafted",
+    })
+    # Explicitly clear stale (simulating operator regenerated the draft).
+    update_lead(lead_id, draft_stale=0)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert bool(row["draft_stale"]) is False
+
+    # Run init_db again — migration should be a no-op for draft_stale
+    # because the column already exists.
+    init_db()
+
+    row = get_lead(lead_id)
+    assert bool(row["draft_stale"]) is False

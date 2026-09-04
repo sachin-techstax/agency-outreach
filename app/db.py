@@ -185,12 +185,36 @@ _RUN_MIGRATION_COLUMNS = [
 
 
 def _migrate(db: sqlite3.Connection) -> None:
-    """Add columns that may be missing in older database files."""
+    """Add columns that may be missing in older database files.
+
+    When the ``draft_stale`` column is first added to an existing production
+    database, existing drafts that predate freshness tracking cannot be
+    trusted as fresh.  The migration marks existing rows stale where:
+      - ``draft`` is non-empty
+      - ``status`` is one of ``drafted``, ``rejected``, ``approved``
+    (i.e. statuses where regeneration is a meaningful operator action).
+    Rows in ``gmail_drafted``, ``sent``, or ``do_not_contact`` are NOT
+    marked stale by migration — those represent workflow states where
+    regeneration is not the expected next step.
+    """
     cols = {row["name"] for row in db.execute("PRAGMA table_info(leads)").fetchall()}
     for col_name, col_type in _MIGRATION_COLUMNS:
         if col_name not in cols:
             db.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_type}")
             logger.debug("Added column %s to leads table", col_name)
+            # R1-1: When draft_stale is first added, mark existing
+            # regeneratable drafts stale.  Existing production drafts
+            # predate freshness tracking and cannot be trusted as fresh.
+            if col_name == "draft_stale":
+                db.execute(
+                    "UPDATE leads SET draft_stale = 1 "
+                    "WHERE COALESCE(draft, '') <> '' "
+                    "AND status IN ('drafted', 'rejected', 'approved')"
+                )
+                logger.info(
+                    "Migration: marked existing regeneratable drafts stale "
+                    "(draft_stale=1 for drafted/rejected/approved with non-empty draft)"
+                )
     run_cols = {row["name"] for row in db.execute("PRAGMA table_info(runs)").fetchall()}
     for col_name, col_type in _RUN_MIGRATION_COLUMNS:
         if col_name not in run_cols:
