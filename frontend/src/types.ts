@@ -172,6 +172,7 @@ export type RefreshResult = {
     contact_quality?: string;
     reason?: string;
     draft_marked_stale?: boolean;
+    message?: string;
   };
   lead: Lead;
 };

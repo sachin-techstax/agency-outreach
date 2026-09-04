@@ -1571,8 +1571,10 @@ def test_regenerate_draft_creates_fresh_draft_and_clears_stale(tmp_path, monkeyp
     assert row["gmail_draft_id"] is None or row["gmail_draft_id"] == ""
 
 
-def test_regenerate_draft_preserves_approved_status(tmp_path, monkeypatch):
-    """Regeneration does not change an approved status — operator must re-review."""
+def test_regenerate_draft_revokes_approved_status(tmp_path, monkeypatch):
+    """R1-7: Regeneration of an approved stale draft revokes approval.
+    The new content was never reviewed, so the lead returns to 'drafted'
+    and requires re-approval.  The new draft must NOT inherit approval."""
     _live_mode(tmp_path)
     init_db()
     lead_id = upsert_lead({
@@ -1587,7 +1589,7 @@ def test_regenerate_draft_preserves_approved_status(tmp_path, monkeypatch):
         "contact_quality": "medium",
         "subject": "Old subject",
         "draft": "Old draft",
-        "status": "approved",  # protected
+        "status": "approved",  # was approved
         "draft_stale": 1,
     })
 
@@ -1600,7 +1602,8 @@ def test_regenerate_draft_preserves_approved_status(tmp_path, monkeypatch):
 
     from app.db import get_lead
     row = get_lead(lead_id)
-    assert row["status"] == "approved"  # unchanged
+    # R1-7: Status is now 'drafted', NOT 'approved'.  Approval is revoked.
+    assert row["status"] == "drafted"
     assert row["subject"] == "New subject"
     assert row["draft"] == "New draft"
     assert bool(row["draft_stale"]) is False
@@ -1609,8 +1612,11 @@ def test_regenerate_draft_preserves_approved_status(tmp_path, monkeypatch):
 def test_regenerate_draft_missing_lead_raises(tmp_path):
     _live_mode(tmp_path)
     init_db()
-    with pytest.raises(ValueError):
+    # R1-5: Missing lead raises RegenerationBlocked with 404 status.
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
         pipeline_mod.regenerate_draft(999999)
+    assert exc_info.value.status_code == 404
 
 
 def test_api_refresh_returns_draft_marked_stale(tmp_path, monkeypatch):
@@ -1931,3 +1937,643 @@ def test_migration_idempotent_does_not_remark_stale(tmp_path):
 
     row = get_lead(lead_id)
     assert bool(row["draft_stale"]) is False
+
+
+# ---------------------------------------------------------------------------
+# R1 comprehensive regression matrix
+# ---------------------------------------------------------------------------
+
+def _stale_lead(**overrides) -> dict:
+    """Build a standard stale-draft lead fixture for regression tests."""
+    base = {
+        "company": "Co",
+        "domain": "co.example",
+        "website": "https://co.example",
+        "score": 80,
+        "proof_project": "WingerX",
+        "fit_reason": "fit reason",
+        "outreach_angle": "angle",
+        "summary": "summary",
+        "services": "services",
+        "contact_email": "hello@co.example",
+        "contact_name": "Jane",
+        "contact_role": "CEO",
+        "contact_source": "homepage",
+        "contact_quality": "medium",
+        "subject": "Old subject",
+        "draft": "Old draft body",
+        "status": "drafted",
+        "draft_stale": 1,
+    }
+    base.update(overrides)
+    return base
+
+
+def _fresh_lead(**overrides) -> dict:
+    return _stale_lead(draft_stale=0, **overrides)
+
+
+# --- R1-2 field-level stale detection ---------------------------------------
+
+def test_refresh_marks_stale_when_company_changes(tmp_path, monkeypatch):
+    """company change -> stale."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead(_stale_lead(company=expected_company, draft_stale=0))
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example"))
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", lambda company, website, text: {
+        "summary": "summary", "services": "services",
+        "fit_reason": "fit reason", "proof_project": "WingerX",
+        "outreach_angle": "angle",
+    })
+    monkeypatch.setattr(pipeline_mod, "extract_company_name", lambda title, domain: "NEW COMPANY")
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["draft_marked_stale"] is True
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is True
+
+
+def test_refresh_marks_stale_when_outreach_angle_changes(tmp_path, monkeypatch):
+    """outreach_angle change -> stale."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead(_stale_lead(company=expected_company, draft_stale=0))
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example"))
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", lambda company, website, text: {
+        "summary": "summary", "services": "services",
+        "fit_reason": "fit reason", "proof_project": "WingerX",
+        "outreach_angle": "COMPLETELY NEW ANGLE",
+    })
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["draft_marked_stale"] is True
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is True
+
+
+def test_refresh_does_not_mark_stale_when_only_score_changes(tmp_path, monkeypatch):
+    """score-only change -> NOT stale (score is not a draft-driving field)."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead(_stale_lead(company=expected_company, draft_stale=0, score=50))
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example"))
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", lambda company, website, text: {
+        "summary": "summary", "services": "services",
+        "fit_reason": "fit reason", "proof_project": "WingerX",
+        "outreach_angle": "angle",
+    })
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["draft_marked_stale"] is False
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is False
+
+
+def test_refresh_does_not_mark_stale_when_only_contact_changes(tmp_path, monkeypatch):
+    """contact-only change -> NOT stale (contact fields are not draft-driving)."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead(_stale_lead(company=expected_company, draft_stale=0))
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example"))
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", lambda company, website, text: {
+        "summary": "summary", "services": "services",
+        "fit_reason": "fit reason", "proof_project": "WingerX",
+        "outreach_angle": "angle",
+    })
+    monkeypatch.setattr(
+        pipeline_mod, "discover_contact",
+        lambda *a, **kw: {"contact_email": "new-contact@co.example", "contact_name": "New Person", "contact_role": "CTO", "contact_source": "contact", "contact_quality": "high"},
+    )
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["contact_refreshed"] is True
+    assert result["draft_marked_stale"] is False
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is False
+
+
+# --- R1-3 draft body existence ----------------------------------------------
+
+def test_refresh_subject_only_no_draft_body_not_stale(tmp_path, monkeypatch):
+    """R1-3: A stray subject with no draft body must not create a stale workflow."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead(_stale_lead(
+        company=expected_company, draft_stale=0,
+        subject="Orphan subject", draft="",
+    ))
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example"))
+    monkeypatch.setattr(pipeline_mod, "analyze_agency", lambda company, website, text: {
+        "summary": "summary", "services": "services",
+        "fit_reason": "NEW fit", "proof_project": "WingerX",
+        "outreach_angle": "angle",
+    })
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["draft_marked_stale"] is False
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is False
+
+
+# --- R1-4 normal pipeline clears stale --------------------------------------
+
+def test_normal_pipeline_clears_stale_on_new_draft(tmp_path, monkeypatch):
+    """R1-4: Normal pipeline draft generation explicitly clears draft_stale."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(draft_stale=1, status="drafted"))
+
+    from app.db import get_lead
+    assert bool(get_lead(lead_id)["draft_stale"]) is True
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+    from app.db import update_lead
+    update_lead(lead_id, subject="New subject", draft="New body", status="drafted", draft_stale=0)
+
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+    assert row["subject"] == "New subject"
+    assert row["draft"] == "New body"
+
+
+# --- R1-5/R1-6 regeneration preconditions and status matrix -----------------
+
+def test_regenerate_fresh_drafted_returns_409(tmp_path):
+    """Fresh drafted lead -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_fresh_lead())
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+    assert "already up to date" in str(exc_info.value).lower()
+
+
+def test_regenerate_fresh_approved_returns_409(tmp_path):
+    """Fresh approved lead -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_fresh_lead(status="approved"))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+
+
+def test_regenerate_no_draft_returns_409(tmp_path):
+    """No draft body -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(draft="", subject=""))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+    assert "no existing" in str(exc_info.value).lower()
+
+
+def test_regenerate_gmail_drafted_returns_409(tmp_path):
+    """gmail_drafted -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="gmail_drafted", gmail_draft_id="gmail-123"))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+
+
+def test_regenerate_sent_returns_409(tmp_path):
+    """sent -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="sent"))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+
+
+def test_regenerate_do_not_contact_returns_409(tmp_path):
+    """do_not_contact -> regeneration blocked (409)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="do_not_contact"))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+
+
+def test_regenerate_approved_with_gmail_draft_id_returns_409(tmp_path):
+    """R1-8: approved lead with gmail_draft_id -> blocked even though status allows."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved", gmail_draft_id="gmail-abc"))
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+    assert "gmail" in str(exc_info.value).lower()
+
+
+def test_regenerate_stale_rejected_returns_drafted(tmp_path, monkeypatch):
+    """R1-6: stale rejected -> regenerate -> drafted, fresh."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="rejected"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+    assert row["subject"] == "New subject"
+    assert row["draft"] == "New body"
+
+
+def test_blocked_regeneration_does_not_call_draft_outreach(tmp_path):
+    """R1-5/R1-6: blocked regeneration must NOT call draft_outreach()."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_fresh_lead())
+
+    called = {"called": False}
+    def fake_draft(*a):
+        called["called"] = True
+        return ("X", "Y")
+
+    import app.pipeline as pm
+    original = pm.draft_outreach
+    pm.draft_outreach = fake_draft
+    try:
+        from app.pipeline import RegenerationBlocked
+        with pytest.raises(RegenerationBlocked):
+            pm.regenerate_draft(lead_id)
+    finally:
+        pm.draft_outreach = original
+
+    assert called["called"] is False
+
+
+# --- R1-7 approved regeneration does not inherit approval --------------------
+
+def test_approved_regenerated_content_does_not_inherit_approval(tmp_path, monkeypatch):
+    """R1-7: After regenerating an approved stale draft, the new content is
+    in 'drafted' state and requires re-approval."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert row["subject"] == "Fresh subject"
+    assert row["draft"] == "Fresh body"
+    assert bool(row["draft_stale"]) is False
+    assert row["status"] != "approved"
+
+
+# --- R1-11 regeneration side-effect isolation -------------------------------
+
+def test_regenerate_preserves_contact_fields(tmp_path, monkeypatch):
+    """R1-11: Regeneration must NOT modify contact fields."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(
+        contact_name="Jane Doe",
+        contact_role="CEO",
+        contact_email="jane@co.example",
+        contact_source="about",
+        contact_quality="high",
+    ))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["contact_name"] == "Jane Doe"
+    assert row["contact_role"] == "CEO"
+    assert row["contact_email"] == "jane@co.example"
+    assert row["contact_source"] == "about"
+    assert row["contact_quality"] == "high"
+
+
+def test_regenerate_preserves_followup_dates(tmp_path, monkeypatch):
+    """R1-11: Regeneration must NOT modify follow-up dates."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(
+        last_contact_at="2026-01-01T00:00:00+00:00",
+        followup_due_at="2026-01-08T00:00:00+00:00",
+    ))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["last_contact_at"] == "2026-01-01T00:00:00+00:00"
+    assert row["followup_due_at"] == "2026-01-08T00:00:00+00:00"
+
+
+def test_regenerate_preserves_research_fields(tmp_path, monkeypatch):
+    """R1-11: Regeneration must NOT modify research fields."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(
+        company="My Company",
+        fit_reason="my fit",
+        proof_project="My Proof",
+        outreach_angle="my angle",
+        summary="my summary",
+        services="my services",
+        score=77,
+    ))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+
+    pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["company"] == "My Company"
+    assert row["fit_reason"] == "my fit"
+    assert row["proof_project"] == "My Proof"
+    assert row["outreach_angle"] == "my angle"
+    assert row["summary"] == "my summary"
+    assert row["services"] == "my services"
+    assert row["score"] == 77
+
+
+def test_regenerate_uses_current_research_fields(tmp_path, monkeypatch):
+    """Regeneration uses CURRENT company, fit_reason, proof_project, outreach_angle."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(
+        company="Current Co",
+        fit_reason="current fit",
+        proof_project="Forge Crew",
+        outreach_angle="current angle",
+    ))
+
+    captured = {}
+    def fake_draft(company, fit_reason, proof_project, outreach_angle):
+        captured["company"] = company
+        captured["fit_reason"] = fit_reason
+        captured["proof_project"] = proof_project
+        captured["outreach_angle"] = outreach_angle
+        return ("New subject", "New body")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fake_draft)
+    pipeline_mod.regenerate_draft(lead_id)
+
+    assert captured["company"] == "Current Co"
+    assert captured["fit_reason"] == "current fit"
+    assert captured["proof_project"] == "Forge Crew"
+    assert captured["outreach_angle"] == "current angle"
+
+
+def test_regenerate_never_calls_gmail(tmp_path, monkeypatch):
+    """R1-11: Regeneration must NOT call Gmail create_draft."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead())
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("New subject", "New body"))
+
+    gmail_called = {"called": False}
+    def fake_gmail_create(*a, **kw):
+        gmail_called["called"] = True
+        return "should-not-happen"
+
+    import app.api as api_module
+    original = api_module.create_draft
+    api_module.create_draft = fake_gmail_create
+    try:
+        pipeline_mod.regenerate_draft(lead_id)
+    finally:
+        api_module.create_draft = original
+
+    assert gmail_called["called"] is False
+
+
+# --- R1-9 stale draft approval -> 409 ---------------------------------------
+
+def test_api_approve_stale_draft_returns_409(tmp_path):
+    """R1-9: Approving a stale draft returns 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted", draft_stale=1))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/approve")
+    assert resp.status_code == 409
+    assert "stale" in resp.json()["detail"].lower()
+
+    from app.db import get_lead
+    assert get_lead(lead_id)["status"] == "drafted"
+
+
+def test_api_approve_fresh_draft_succeeds(tmp_path):
+    """R1-9: Approving a fresh draft succeeds normally."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_fresh_lead(status="drafted"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/approve")
+    assert resp.status_code == 200
+
+    from app.db import get_lead
+    assert get_lead(lead_id)["status"] == "approved"
+
+
+# --- R1-10 stale Gmail creation -> 409 --------------------------------------
+
+def test_api_gmail_draft_stale_returns_409(tmp_path, monkeypatch):
+    """R1-10: Creating a Gmail draft for a stale approved draft returns 409
+    and does NOT call create_draft()."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved", draft_stale=1))
+
+    create_called = {"called": False}
+    def fake_create(*a, **kw):
+        create_called["called"] = True
+        return "should-not-happen"
+
+    monkeypatch.setattr(api_mod, "create_draft", fake_create)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/gmail-draft")
+    assert resp.status_code == 409
+    assert "stale" in resp.json()["detail"].lower()
+    assert create_called["called"] is False
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "approved"
+
+
+# --- R1-12 demo mode blocks regeneration before LLM -------------------------
+
+def test_api_regenerate_draft_demo_mode_returns_403(tmp_path, monkeypatch):
+    """R1-12: Demo mode blocks regeneration with 403 and does NOT call
+    draft_outreach()."""
+    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    db_path = tmp_path / "demo.db"
+    object.__setattr__(settings, "db_path", db_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead())
+
+    draft_called = {"called": False}
+    def fake_draft(*a):
+        draft_called["called"] = True
+        return ("X", "Y")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fake_draft)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 403
+    assert draft_called["called"] is False
+
+
+# --- R1-16 refresh error sanitization ---------------------------------------
+
+def test_refresh_error_sanitizes_secret(tmp_path, monkeypatch):
+    """R1-16: Refresh errors must not expose raw exception text or secrets."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead())
+
+    secret = "sk-test-super-secret"
+    def exploding_crawl(url):
+        raise RuntimeError(f"API key {secret} is invalid")
+
+    monkeypatch.setattr(pipeline_mod, "crawl_company", exploding_crawl)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/refresh-research")
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert secret not in detail
+    assert "RuntimeError" in detail
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    row_str = str(dict(row))
+    assert secret not in row_str
+
+
+# --- R1-17 regeneration error sanitization ----------------------------------
+
+def test_regenerate_error_sanitizes_secret(tmp_path, monkeypatch):
+    """R1-17: Regeneration errors must not expose raw exception text or secrets."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead())
+
+    secret = "sk-test-super-secret"
+    def exploding_draft(*a):
+        raise RuntimeError(f"OpenAI key {secret} rejected")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", exploding_draft)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert secret not in detail
+    assert "RuntimeError" in detail
+
+
+# --- R1-6 API-level status matrix for regeneration --------------------------
+
+def test_api_regenerate_gmail_drafted_returns_409(tmp_path):
+    """API: gmail_drafted regeneration -> 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="gmail_drafted", gmail_draft_id="g-1"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+
+
+def test_api_regenerate_sent_returns_409(tmp_path):
+    """API: sent regeneration -> 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="sent"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+
+
+def test_api_regenerate_do_not_contact_returns_409(tmp_path):
+    """API: do_not_contact regeneration -> 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="do_not_contact"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+
+
+def test_api_regenerate_fresh_drafted_returns_409(tmp_path):
+    """API: fresh drafted regeneration -> 409 (no draft_outreach call)."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_fresh_lead(status="drafted"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+    assert "up to date" in resp.json()["detail"].lower()
+
+
+def test_api_regenerate_stale_approved_revokes_to_drafted(tmp_path, monkeypatch):
+    """API: stale approved regeneration -> 200, status becomes drafted."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["lead"]["status"] == "drafted"
+    assert body["lead"]["draft_stale"] is False
+    assert body["lead"]["subject"] == "Fresh subject"
