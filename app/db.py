@@ -143,6 +143,31 @@ CREATE TABLE IF NOT EXISTS leads (
     followup_due_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status_score ON leads(status, score DESC);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requested_limit INTEGER,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    query_count INTEGER,
+    raw_candidate_domains INTEGER,
+    candidate_domains INTEGER,
+    fresh_retryable_pool INTEGER,
+    attempted INTEGER,
+    processed INTEGER,
+    qualified INTEGER,
+    drafted INTEGER,
+    below_score INTEGER,
+    no_contact INTEGER,
+    skipped INTEGER,
+    failed_count INTEGER,
+    duration_s REAL,
+    error_summary TEXT,
+    progress TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 """
 
 # Columns to add if they don't exist (backward-compatible migration).
@@ -384,3 +409,85 @@ def get_suppressed_domains(domains: Iterable[str]) -> dict[str, str]:
         for domain, status in statuses.items()
         if is_suppressed_status(status)
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistent run history
+# ---------------------------------------------------------------------------
+
+# Run lifecycle statuses.
+RUN_QUEUED = "queued"
+RUN_RUNNING = "running"
+RUN_COMPLETED = "completed"
+RUN_FAILED = "failed"
+
+# Run types.  ``processing`` is the user-facing label for the outreach
+# pipeline run; ``discovery`` is the read-only discovery ranking run.
+RUN_TYPE_DISCOVERY = "discovery"
+RUN_TYPE_PROCESSING = "processing"
+
+# Columns that may be updated after creation.  ``type`` and ``started_at`` are
+# immutable once a run row exists.
+_RUN_UPDATE_COLUMNS = (
+    "status", "completed_at", "query_count", "raw_candidate_domains",
+    "candidate_domains", "fresh_retryable_pool", "attempted", "processed",
+    "qualified", "drafted", "below_score", "no_contact", "skipped",
+    "failed_count", "duration_s", "error_summary", "progress",
+)
+
+
+def create_run(run_type: str, requested_limit: int | None = None) -> int:
+    """Create a new run row in ``queued`` state and return its id."""
+    init_db()
+    stamp = now_iso()
+    with conn() as db:
+        cur = db.execute(
+            "INSERT INTO runs (type, status, requested_limit, started_at) "
+            "VALUES (?, ?, ?, ?)",
+            (run_type, RUN_QUEUED, requested_limit, stamp),
+        )
+        return int(cur.lastrowid)
+
+
+def update_run(run_id: int, **updates) -> None:
+    """Update specific fields on a run row.
+
+    Only fields in :data:`_RUN_UPDATE_COLUMNS` are written; unknown keys are
+    ignored so callers can pass pipeline summary dicts without filtering.
+    """
+    if not updates:
+        return
+    init_db()
+    allowed = {k: v for k, v in updates.items() if k in _RUN_UPDATE_COLUMNS}
+    if not allowed:
+        return
+    cols = list(allowed)
+    values = [allowed[c] for c in cols] + [run_id]
+    with conn() as db:
+        db.execute(
+            f"UPDATE runs SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
+            values,
+        )
+
+
+def set_run_progress(run_id: int, progress: dict) -> None:
+    """Persist a JSON progress snapshot for an active run."""
+    import json as _json
+    update_run(run_id, progress=_json.dumps(progress, separators=(",", ":")))
+
+
+def get_run(run_id: int):
+    """Return the run row (sqlite3.Row) or None."""
+    init_db()
+    with conn() as db:
+        return db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+
+
+def list_runs(limit: int = 50):
+    """Return recent run rows ordered by most-recent first."""
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()

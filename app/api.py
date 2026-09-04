@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import os
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,17 +16,28 @@ from fastapi.staticfiles import StaticFiles
 from .auth import validate_auth_config, valid_api_token
 from .config import settings
 from .db import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_QUEUED,
+    RUN_RUNNING,
+    RUN_TYPE_DISCOVERY,
+    RUN_TYPE_PROCESSING,
     SUPPRESSED_STATUSES,
+    create_run,
     due_followups,
     get_lead,
+    get_run,
     init_db,
     list_leads,
+    list_runs,
     now_iso,
+    set_run_progress,
     update_lead,
+    update_run,
 )
 from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
 from .gmail_client import create_draft
-from .pipeline import discover_only, run as run_pipeline
+from .pipeline import discover_only, refresh_lead_research, run as run_pipeline
 
 app = FastAPI(
     title="PactSignal Operator API",
@@ -44,6 +56,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Single global lock guarding any pipeline/discovery execution.  Held for the
+# entire lifetime of a background run so concurrent run requests return 409.
 _RUN_LOCK = threading.Lock()
 _LATEST_RUN: dict[str, Any] | None = None
 
@@ -134,6 +148,91 @@ def _run_exclusive(fn):
         _RUN_LOCK.release()
 
 
+def _serialize_run(row: Any) -> dict:
+    data = dict(row)
+    progress = data.get("progress")
+    if progress:
+        try:
+            data["progress"] = json.loads(progress)
+        except (json.JSONDecodeError, TypeError):
+            data["progress"] = None
+    else:
+        data["progress"] = None
+    return data
+
+
+def _start_background_run(
+    run_type: str,
+    limit: int,
+    executor: Callable[[int, Callable[[dict], None]], dict],
+) -> dict:
+    """Create a run row, claim the run lock, and execute in a background thread.
+
+    The lock is claimed synchronously so a concurrent run returns 409 before
+    any work starts.  The lock is held until the background worker finishes.
+
+    ``executor`` receives ``(limit, progress_cb)`` and returns the pipeline
+    summary dict.  The run row is transitioned queued -> running -> completed
+    or failed, with progress snapshots persisted along the way.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A PactSignal run is already in progress",
+        )
+    run_id = create_run(run_type, requested_limit=limit)
+    update_run(run_id, status=RUN_RUNNING)
+    global _LATEST_RUN
+
+    def worker() -> None:
+        global _LATEST_RUN
+        try:
+            def progress_cb(snapshot: dict) -> None:
+                set_run_progress(run_id, snapshot)
+
+            result = executor(limit, progress_cb)
+            summary_fields = {
+                "status": RUN_COMPLETED,
+                "completed_at": now_iso(),
+                "query_count": result.get("query_count"),
+                "raw_candidate_domains": result.get("raw_candidate_domains"),
+                "candidate_domains": result.get("candidate_domains"),
+                "fresh_retryable_pool": result.get("fresh_retryable_pool"),
+                "attempted": result.get("attempted"),
+                "processed": result.get("processed"),
+                "qualified": result.get("qualified"),
+                "drafted": result.get("drafted"),
+                "below_score": result.get("below_score"),
+                "no_contact": result.get("no_contact"),
+                "skipped": result.get("skipped"),
+                "failed_count": result.get("failed"),
+                "duration_s": result.get("duration_s"),
+                "error_summary": None,
+            }
+            update_run(run_id, **summary_fields)
+            _LATEST_RUN = {"type": run_type, **result}
+        except Exception as exc:
+            error_summary = f"{type(exc).__name__}: {exc}"[:500]
+            update_run(
+                run_id,
+                status=RUN_FAILED,
+                completed_at=now_iso(),
+                error_summary=error_summary,
+            )
+            logger_error = traceback.format_exc()
+            _LATEST_RUN = {
+                "type": run_type,
+                "error": error_summary,
+                "traceback": logger_error,
+            }
+        finally:
+            _RUN_LOCK.release()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return _serialize_run(get_run(run_id))
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {
@@ -180,12 +279,19 @@ def dashboard() -> dict:
 
     queue_statuses = {"drafted", "approved", "qualified", "discovered"}
     review_queue = [row for row in rows if row["status"] in queue_statuses][:6]
+
+    # Surface the most recent run row so the UI can show real persisted state
+    # (status, started_at, type) instead of only the in-memory latest run.
+    recent_runs = list_runs(limit=1)
+    latest_run_row = _serialize_run(recent_runs[0]) if recent_runs else None
+
     return {
         "mode": "private",
         "counts": counts,
         "due_followups": len(due_followups(now_iso())),
         "review_queue": review_queue,
         "latest_run": _LATEST_RUN,
+        "latest_run_row": latest_run_row,
     }
 
 
@@ -301,30 +407,133 @@ def mark_sent(lead_id: int) -> dict:
     return _live_lead(lead_id)
 
 
+@app.post("/api/leads/{lead_id}/refresh-research")
+def refresh_research(lead_id: int) -> dict:
+    """Re-crawl and re-research an existing lead without changing workflow state.
+
+    Protected workflow state (status, draft, gmail_draft_id, follow-up dates)
+    is never modified.  Contact fields are updated only when the refresh
+    discovers a better contact than the one currently stored.
+    """
+    _require_live_mode()
+    lead = _live_lead(lead_id)
+    try:
+        result = refresh_lead_research(lead_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research refresh failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    refreshed = _live_lead(lead_id)
+    return {"refresh": result, "lead": refreshed}
+
+
 @app.post("/api/runs/discovery")
 def run_discovery(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    """Start a read-only discovery run in the background and return the run row.
+
+    Returns immediately with ``status`` set to ``running``.  Poll
+    ``GET /api/runs/{id}`` to observe progress and completion.  A concurrent
+    run request returns ``409``.
+    """
     _require_live_mode()
 
-    def execute():
-        global _LATEST_RUN
-        result = discover_only(limit)
-        _LATEST_RUN = {"type": "discovery", **result}
-        return _LATEST_RUN
+    def execute(lim: int, progress_cb):
+        return discover_only(lim, progress_cb=progress_cb)
 
-    return _run_exclusive(execute)
+    return _start_background_run(RUN_TYPE_DISCOVERY, limit, execute)
+
+
+@app.post("/api/runs/process")
+def run_process(limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    """Start a 'Process prospects' run (discovery + qualification + drafting).
+
+    This is the user-facing label for the outreach-processing pipeline.  It
+    does NOT send email.  Returns immediately with ``status`` set to
+    ``running``; poll ``GET /api/runs/{id}`` for progress.  A concurrent run
+    request returns ``409``.
+    """
+    _require_live_mode()
+
+    def execute(lim: int, progress_cb):
+        return run_pipeline(lim, progress_cb=progress_cb)
+
+    return _start_background_run(RUN_TYPE_PROCESSING, limit, execute)
 
 
 @app.post("/api/runs/outreach")
 def run_outreach(limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    """Backward-compatible alias for ``POST /api/runs/process``.
+
+    The user-facing operator label is 'Process prospects'; this route is kept
+    so existing CLI/automation callers continue to work.  It runs the same
+    background processing pipeline and persists the run as type
+    ``processing``.
+    """
     _require_live_mode()
 
-    def execute():
-        global _LATEST_RUN
-        result = run_pipeline(limit)
-        _LATEST_RUN = {"type": "outreach", **result}
-        return _LATEST_RUN
+    def execute(lim: int, progress_cb):
+        return run_pipeline(lim, progress_cb=progress_cb)
 
-    return _run_exclusive(execute)
+    return _start_background_run(RUN_TYPE_PROCESSING, limit, execute)
+
+
+@app.get("/api/runs")
+def runs(limit: int = Query(default=50, ge=1, le=200)) -> dict:
+    """List recent persistent run rows (most recent first)."""
+    if settings.pactsignal_demo_mode:
+        return {"items": [], "total": 0}
+    init_db()
+    rows = [_serialize_run(r) for r in list_runs(limit=limit)]
+    return {"items": rows, "total": len(rows)}
+
+
+@app.get("/api/runs/{run_id}")
+def run_detail(run_id: int) -> dict:
+    """Return a single persistent run row by id."""
+    if settings.pactsignal_demo_mode:
+        raise HTTPException(status_code=404, detail="Run not found")
+    init_db()
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _serialize_run(row)
+
+
+@app.get("/api/followups")
+def followups() -> dict:
+    """List sent leads whose follow-up date is due."""
+    if settings.pactsignal_demo_mode:
+        # Surface the demo sent leads as due follow-ups for portfolio display.
+        items = [
+            {
+                "id": lead["id"],
+                "company": lead["company"],
+                "domain": lead["domain"],
+                "contact_email": lead.get("contact_email") or "",
+                "status": lead["status"],
+                "last_contact_at": lead.get("last_contact_at"),
+                "followup_due_at": lead.get("followup_due_at"),
+            }
+            for lead in DEMO_LEADS
+            if lead["status"] == "sent"
+        ]
+        return {"items": items, "total": len(items)}
+    init_db()
+    rows = due_followups(now_iso())
+    items = [
+        {
+            "id": row["id"],
+            "company": row["company"],
+            "domain": row["domain"],
+            "contact_email": row["contact_email"] or "",
+            "status": row["status"],
+            "last_contact_at": row["last_contact_at"],
+            "followup_due_at": row["followup_due_at"],
+        }
+        for row in rows
+    ]
+    return {"items": items, "total": len(items)}
 
 
 # Serve the compiled React app when it is present (Docker/web runtime). During

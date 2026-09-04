@@ -1,4 +1,14 @@
-import type { DashboardData, Lead, LeadList, Meta } from "./types";
+import type {
+  DashboardData,
+  DiscoveryResult,
+  FollowupList,
+  Lead,
+  LeadList,
+  Meta,
+  RefreshResult,
+  RunList,
+  RunRow
+} from "./types";
 
 const TOKEN_KEY = "pactsignal_api_token";
 
@@ -54,8 +64,15 @@ export const api = {
   lead: (id: number) => request<Lead>(`/api/leads/${id}`),
   action: (id: number, action: string) =>
     request<Lead>(`/api/leads/${id}/${action}`, { method: "POST" }),
+  refreshResearch: (id: number) =>
+    request<RefreshResult>(`/api/leads/${id}/refresh-research`, { method: "POST" }),
   runDiscovery: (limit = 20) =>
-    request<Record<string, unknown>>(`/api/runs/discovery?limit=${limit}`, { method: "POST" }),
+    request<RunRow>(`/api/runs/discovery?limit=${limit}`, { method: "POST" }),
+  runProcess: (limit = 10) =>
+    request<RunRow>(`/api/runs/process?limit=${limit}`, { method: "POST" }),
   runOutreach: (limit = 10) =>
-    request<Record<string, unknown>>(`/api/runs/outreach?limit=${limit}`, { method: "POST" })
+    request<RunRow>(`/api/runs/outreach?limit=${limit}`, { method: "POST" }),
+  runs: (limit = 50) => request<RunList>(`/api/runs?limit=${limit}`),
+  run: (id: number) => request<RunRow>(`/api/runs/${id}`),
+  followups: () => request<FollowupList>("/api/followups")
 };

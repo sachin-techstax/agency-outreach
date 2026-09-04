@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import parse_qs, urlparse
 
 from .logging_config import get_logger
 
@@ -58,26 +59,74 @@ def _is_rejected(local_part: str) -> bool:
     return local_part in REJECTED_LOCAL_PARTS
 
 
-def discover_contact(text: str, pages: list[tuple[str, str]], domain: str) -> dict:
-    """Discover the best public contact email from crawled site text.
+def _normalize_mailto(raw: str) -> str:
+    """Normalize a raw ``mailto:`` href to a bare lowercase email.
+
+    Strips the ``mailto:`` prefix and any query parameters:
+    ``mailto:hello@example.com?subject=Project`` -> ``hello@example.com``.
+    """
+    value = raw.strip()
+    if value.lower().startswith("mailto:"):
+        value = value[7:]
+    # Strip any query/fragment that followed the address.
+    parsed = urlparse(value)
+    return parsed.path.lower().strip()
+
+
+def _is_company_domain(email: str, domain: str) -> bool:
+    return email.endswith("@" + domain)
+
+
+def discover_contact(
+    text: str,
+    pages: list[tuple[str, str]],
+    domain: str,
+    mailtos: list[tuple[str, str]] | None = None,
+) -> dict:
+    """Discover the best public contact email from crawled site text + mailtos.
 
     Returns a dict with:
     - ``contact_email``: best email or ""
-    - ``contact_source``: where the email was found ("website", page URL, or "")
+    - ``contact_source``: where the email was found (page URL, or "")
     - ``contact_name``: "" (we do not infer person names)
     - ``contact_role``: detected role from text, or "" if none found
     - ``contact_quality``: "high", "medium", "low", or "none"
-    """
-    # Collect all emails from the company's own domain
-    emails: list[tuple[str, str]] = []
-    for source, chunk in [("website", text)] + pages:
-        for email in EMAIL_RE.findall(chunk):
-            e = email.lower()
-            # Only accept emails from the company's own domain
-            if e.endswith("@" + domain) and e not in {x[0] for x in emails}:
-                emails.append((e, source))
 
-    # Filter out rejected local parts
+    Emails are collected from visible text on the homepage and every crawled
+    research page, plus ``mailto:`` hrefs collected by the scraper.  Only
+    emails on the company's own domain are accepted; third-party addresses
+    are ignored.  ``mailto:`` values are normalized (prefix and query
+    parameters stripped) and deduplicated against text-derived emails so a
+    single address found in both places is only counted once.
+    """
+    # Collect all emails from the company's own domain.
+    # Each entry: (email, source_url).  Source is the page URL where the
+    # email was found, so provenance can be persisted accurately.
+    emails: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(email: str, source: str) -> None:
+        e = email.lower()
+        if not _is_company_domain(e, domain):
+            return
+        if e in seen:
+            return
+        seen.add(e)
+        emails.append((e, source))
+
+    # Visible text on the homepage and crawled pages.
+    for source, chunk in [("website", text)] + list(pages):
+        for email in EMAIL_RE.findall(chunk):
+            _add(email, source)
+
+    # mailto: hrefs collected by the scraper (homepage + crawled pages).
+    if mailtos:
+        for raw, source in mailtos:
+            normalized = _normalize_mailto(raw)
+            if normalized and "@" in normalized:
+                _add(normalized, source)
+
+    # Filter out rejected local parts.
     rejected_count = 0
     filtered: list[tuple[str, str, str]] = []  # (email, source, quality)
     for email, source in emails:
@@ -89,7 +138,8 @@ def discover_contact(text: str, pages: list[tuple[str, str]], domain: str) -> di
         quality = _email_quality(local)
         filtered.append((email, source, quality))
 
-    # Sort by quality priority: high > medium > low
+    # Sort by quality priority: high > medium > low, with stable ordering so
+    # the first-seen email wins within a tier (homepage text before pages).
     quality_order = {"high": 0, "medium": 1, "low": 2, "none": 3}
     filtered.sort(key=lambda x: quality_order.get(x[2], 99))
 
@@ -99,7 +149,7 @@ def discover_contact(text: str, pages: list[tuple[str, str]], domain: str) -> di
         preferred = (filtered[0][0], filtered[0][1])
         preferred_quality = filtered[0][2]
 
-    # Detect role from text (do not default to "Founder / CTO")
+    # Detect role from text (do not default to "Founder / CTO").
     lowered = text.lower()
     role = ""
     for r in DETECTABLE_ROLES:
@@ -109,7 +159,8 @@ def discover_contact(text: str, pages: list[tuple[str, str]], domain: str) -> di
 
     if preferred:
         logger.info(
-            "Selected public contact %s quality=%s", preferred[0], preferred_quality
+            "Selected public contact %s quality=%s source=%s",
+            preferred[0], preferred_quality, preferred[1],
         )
     else:
         if emails and rejected_count > 0:
