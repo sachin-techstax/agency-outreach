@@ -109,7 +109,7 @@ def _client() -> OpenAI | None:
     return OpenAI(api_key=settings.openai_api_key)
 
 
-def _contains_forbidden_project(text: str) -> str | None:
+def _contains_forbidden_project(text: str, *, company: str = "") -> str | None:
     """Return the original forbidden project name found in *text*, or ``None``.
 
     R1-1: Matching is case-insensitive and separator-normalized so that
@@ -120,14 +120,32 @@ def _contains_forbidden_project(text: str) -> str | None:
     matching.  This prevents false positives such as ``Aegisian`` matching
     ``Aegis``.  Both the haystack and needle are padded with spaces so
     that only whole-token-sequence boundaries match.
+
+    R3-5/R3-6: When *company* is supplied, a forbidden project-name
+    occurrence that is part of the prospect's company name is tolerated
+    (it is the recipient's identity, not sender proof).  Forbidden-name
+    occurrences elsewhere in the text are still detected.  The company
+    name is canonicalized and removed from the haystack before checking,
+    so that ``Aegis Labs builds...`` does not trigger when the prospect
+    is ``Aegis Labs``, but ``I built Aegis as a code-review agent`` still
+    does.
     """
     if not text:
         return None
     canonical_text = _canonical_project_text(text)
-    # Pad with spaces so that token-sequence boundaries are respected.
-    # "aegis" should NOT match inside "aegisian" because "aegisian" has
-    # extra characters appended without a separator.
     haystack = f" {canonical_text} "
+
+    # R3-5/R3-6: If a prospect company name is supplied, remove its
+    # canonical form from the haystack so that the prospect's own identity
+    # does not trigger a false forbidden-name detection.  Only occurrences
+    # of the forbidden name OUTSIDE the company identity are flagged.
+    if company:
+        canonical_company = _canonical_project_text(company)
+        if canonical_company:
+            # Remove all occurrences of the canonical company phrase.
+            # This is deterministic — no semantic classification.
+            haystack = haystack.replace(f" {canonical_company} ", " ")
+
     for canonical_name, original_name in _FORBIDDEN_CANONICAL.items():
         needle = f" {canonical_name} "
         if needle in haystack:
@@ -140,7 +158,7 @@ def _capability_fallback_subject(company: str) -> str:
     return "Extra AI delivery capacity"
 
 
-def _sanitize_angle(angle: str, max_words: int = 12) -> str:
+def _sanitize_angle(angle: str, max_words: int = 12, *, company: str = "") -> str:
     """Sanitize and truncate an outreach angle for use in fallback copy.
 
     Keeps it short, grounded, and free of fabricated claims.  Strips
@@ -151,6 +169,12 @@ def _sanitize_angle(angle: str, max_words: int = 12) -> str:
     returned.  This prevents the deterministic fallback from reintroducing
     a private project name through the angle.  We do not attempt clever
     word deletion — if the angle is unsafe, we discard it wholesale.
+
+    R3-5/R3-9: When *company* is supplied, the prospect's own company name
+    is tolerated (it is the recipient's identity, not sender proof).  An
+    angle that mentions the prospect's company name is still usable as
+    long as it does not introduce a forbidden project name as sender
+    proof outside the company identity.
     """
     if not angle:
         return ""
@@ -162,7 +186,8 @@ def _sanitize_angle(angle: str, max_words: int = 12) -> str:
         words = words[:max_words]
     result = " ".join(words)
     # R2-1: Reject angles containing forbidden project names.
-    if _contains_forbidden_project(result):
+    # R3-5: Tolerate the prospect's own company name.
+    if _contains_forbidden_project(result, company=company):
         return ""
     return result
 
@@ -179,7 +204,7 @@ def _capability_fallback_body(
     Never names a non-public project.  Positions the sender as senior AI
     engineering capacity, not as a software vendor.
     """
-    angle = _sanitize_angle(outreach_angle)
+    angle = _sanitize_angle(outreach_angle, company=company)
     if angle:
         hook = f"{company}'s work around {angle} looks close to the kind of AI delivery I handle."
     else:
@@ -319,6 +344,27 @@ You are NOT required to mention this project by name.
 OUTREACH-SAFE PROOF BANK
 {json.dumps(nameable_bank, indent=2)}
 
+PUBLIC PROOF URLS
+- URLs are supplied for credibility/context only.
+- Do not automatically include raw URLs in the email.
+- The operator can inspect public proof before approval.
+- Naming a public project does not require including its URL.
+- Prefer concise conversational copy over link dumping.
+- Do not include raw portfolio URLs in normal cold outreach.
+
+SUBJECT
+- Prefer 3 to 7 words.
+- Natural and understated.
+- No clickbait.
+- No fake familiarity.
+- No excessive capitalization.
+- Do not use generic subjects such as "Partnership opportunity".
+- Do not use formulaic subjects such as "White-label AI engineering for {{Company}}".
+- Do not automatically put the prospect company name in the subject.
+- Prefer simple directions such as: Extra AI delivery capacity, Overflow AI engineering, AI delivery support, Extra capacity for AI projects.
+- Do not mention a non-public/private project in the subject.
+- Controlled variation is acceptable — do not rigidly force one subject template.
+
 RULES
 1. Lead with something specific about the prospect.
 2. Position the sender as senior engineering capacity, not as a software vendor.
@@ -335,6 +381,7 @@ RULES
 13. Avoid claiming knowledge that is not in the prospect research.
 14. Do not say "I noticed" or "caught my eye" in every email.
 15. Make the final question easy to answer.
+16. A private project name may coincidentally overlap with the prospect's company name. You may use the supplied prospect company name to refer to the recipient, but never present a private/non-public project as sender proof.
 
 STYLE
 - natural
@@ -402,9 +449,11 @@ def draft_outreach(company: str, fit_reason: str, proof_project: str, outreach_a
 
     # ------------------------------------------------------------------
     # Deterministic guard against private/non-public project names.
+    # R3-5/R3-6: Pass the prospect company name so that a forbidden-name
+    # occurrence that is part of the prospect's own identity is tolerated.
     # ------------------------------------------------------------------
-    forbidden_in_subject = _contains_forbidden_project(subject)
-    forbidden_in_body = _contains_forbidden_project(body)
+    forbidden_in_subject = _contains_forbidden_project(subject, company=company)
+    forbidden_in_body = _contains_forbidden_project(body, company=company)
     if forbidden_in_subject or forbidden_in_body:
         bad = forbidden_in_subject or forbidden_in_body
         logger.warning(
@@ -442,7 +491,7 @@ def draft_outreach(company: str, fit_reason: str, proof_project: str, outreach_a
         logger.info("Outreach retry generated for %s", company)
 
         # If the retry STILL contains a forbidden name, use the safe fallback.
-        if _contains_forbidden_project(subject) or _contains_forbidden_project(body):
+        if _contains_forbidden_project(subject, company=company) or _contains_forbidden_project(body, company=company):
             logger.warning(
                 "Outreach retry for %s still contained a forbidden project name; "
                 "using capability-led fallback",

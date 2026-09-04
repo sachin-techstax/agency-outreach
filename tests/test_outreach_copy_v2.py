@@ -1260,3 +1260,283 @@ def test_forge_crew_as_part_of_larger_word_does_not_false_match():
     # "forgecrews" canonicalizes to "forgecrews" — no space between forge and crew,
     # so "forge crew" (with space) won't match.
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# R3-1/R3-3: Subject prompt contract tests
+# ---------------------------------------------------------------------------
+
+def test_prompt_contains_subject_section():
+    """R3-1: The prompt must contain a dedicated SUBJECT section."""
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "SUBJECT" in prompt
+
+
+def test_prompt_subject_says_3_to_7_words():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "3 to 7 words" in prompt
+
+
+def test_prompt_subject_says_no_clickbait():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "clickbait" in prompt.lower()
+
+
+def test_prompt_subject_says_no_partnership_opportunity():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Partnership opportunity" in prompt
+
+
+def test_prompt_subject_says_no_formulaic_white_label():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "White-label AI engineering for" in prompt
+
+
+def test_prompt_subject_says_company_name_optional():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Do not automatically put the prospect company name" in prompt
+
+
+def test_prompt_subject_forbids_private_projects():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "non-public/private project" in prompt.lower() or "private project" in prompt.lower()
+    # Check the subject section specifically mentions private projects.
+    subject_section = prompt[prompt.index("SUBJECT"):]
+    assert "private" in subject_section.lower() or "non-public" in subject_section.lower()
+
+
+def test_prompt_subject_says_natural_understated():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    subject_section = prompt[prompt.index("SUBJECT"):]
+    assert "natural" in subject_section.lower()
+    assert "understated" in subject_section.lower()
+
+
+def test_prompt_subject_gives_example_directions():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Extra AI delivery capacity" in prompt
+    assert "Overflow AI engineering" in prompt
+
+
+# ---------------------------------------------------------------------------
+# R3-2/R3-4: Public URL guidance prompt tests
+# ---------------------------------------------------------------------------
+
+def test_prompt_still_contains_wingerx_public_url():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "https://wingerx.com/" in prompt
+
+
+def test_prompt_still_contains_gradewise_public_url():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "https://gradewise.quest/" in prompt
+
+
+def test_prompt_says_urls_should_not_automatically_appear():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Do not automatically include raw URLs" in prompt
+
+
+def test_prompt_says_naming_does_not_require_url():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Naming a public project does not require including its URL" in prompt
+
+
+def test_prompt_says_no_raw_portfolio_urls():
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "Do not include raw portfolio URLs" in prompt
+
+
+# ---------------------------------------------------------------------------
+# R3-7: Collision instruction in prompt
+# ---------------------------------------------------------------------------
+
+def test_prompt_contains_collision_instruction():
+    """R3-7: The prompt must clarify the prospect/private-project collision case."""
+    prompt = llm_mod._build_outreach_prompt("TestCo", "fit", "WingerX", "angle")
+    assert "coincidentally overlap" in prompt.lower()
+    assert "prospect company name" in prompt.lower()
+    assert "never present a private/non-public project as sender proof" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# R3-5/R3-6/R3-8: Company-name collision tests
+# ---------------------------------------------------------------------------
+
+def test_aegis_prospect_identity_not_flagged():
+    """R3-5: 'Aegis Labs' as prospect company should not trigger forbidden detection
+    when the text refers to the prospect."""
+    result = llm_mod._contains_forbidden_project(
+        "Aegis Labs' AI delivery work looks relevant",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_aegis_as_sender_proof_still_flagged():
+    """R3-5: 'I built Aegis as a code-review agent' must still be flagged even
+    when the prospect is named Aegis Labs."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Aegis as an autonomous code-review system",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_forge_crew_prospect_identity_not_flagged():
+    """R3-5: 'Forge Crew Studios' as prospect identity should not trigger."""
+    result = llm_mod._contains_forbidden_project(
+        "Forge Crew Studios works on AI delivery",
+        company="Forge Crew Studios",
+    )
+    assert result is None
+
+
+def test_forge_crew_as_sender_proof_still_flagged():
+    """R3-5: 'Forge Crew is one of my multi-agent projects' must still be flagged
+    even when the prospect is named Forge Crew Studios."""
+    result = llm_mod._contains_forbidden_project(
+        "Forge Crew is one of my multi-agent projects",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_ordinary_prospect_forge_crew_still_flagged():
+    """R3-8: LaunchPad Lab + Forge Crew must still be flagged (no collision)."""
+    result = llm_mod._contains_forbidden_project(
+        "Forge Crew is a great orchestrator",
+        company="LaunchPad Lab",
+    )
+    assert result == "Forge Crew"
+
+
+def test_ordinary_prospect_aegis_still_flagged():
+    """R3-8: LaunchPad Lab + Aegis must still be flagged (no collision)."""
+    result = llm_mod._contains_forbidden_project(
+        "Aegis code review agent",
+        company="LaunchPad Lab",
+    )
+    assert result == "Aegis"
+
+
+def test_aegis_prospect_no_unnecessary_retry(monkeypatch):
+    """R3-8: Aegis Labs prospect with legitimate body should NOT trigger retry."""
+    _set_openai_key("test-key")
+
+    resp = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Aegis Labs' agent work looks relevant to what I build.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.return_value = resp
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "WingerX", "angle")
+    assert "Aegis Labs" in body
+    # No retry needed.
+    assert client.responses.create.call_count == 1
+
+
+def test_aegis_prospect_sender_proof_triggers_retry(monkeypatch):
+    """R3-8: Aegis Labs prospect but body names Aegis as sender proof -> retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I built Aegis as an autonomous code-review system for your team.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Aegis Labs' work looks relevant. I build agentic systems.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
+    # Retry happened.
+    assert client.responses.create.call_count == 2
+    # Final body does not present Aegis as sender proof (only as prospect identity).
+    # The retry body mentions "Aegis Labs" (prospect) which is allowed.
+    assert "Aegis Labs" in body
+
+
+def test_forge_crew_prospect_no_unnecessary_retry(monkeypatch):
+    """R3-8: Forge Crew Studios prospect with legitimate body should NOT trigger retry."""
+    _set_openai_key("test-key")
+
+    resp = _mock_response(json.dumps({
+        "subject": "Overflow AI engineering",
+        "body": "Forge Crew Studios works on AI delivery and could use extra capacity.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.return_value = resp
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Forge Crew Studios", "fit", "WingerX", "angle")
+    assert "Forge Crew Studios" in body
+    assert client.responses.create.call_count == 1
+
+
+def test_forge_crew_prospect_sender_proof_triggers_retry(monkeypatch):
+    """R3-8: Forge Crew Studios prospect but body names Forge Crew as sender proof -> retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Forge Crew is one of my multi-agent projects for engineering teams.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Forge Crew Studios' AI work looks relevant. I build agentic systems.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Forge Crew Studios", "fit", "Forge Crew", "angle")
+    assert client.responses.create.call_count == 2
+
+
+def test_aegis_prospect_fallback_uses_company_name():
+    """R3-9: Fallback for Aegis Labs may contain the company name (not leakage)."""
+    body = llm_mod._capability_fallback_body("Aegis Labs", "fit", "AI agents")
+    assert "Aegis Labs" in body
+    # But must not present Aegis as sender proof (standalone, not as company).
+    # The company name "Aegis Labs" is allowed; standalone "Aegis" as proof is not.
+    # Check that "Aegis" does not appear outside the company name context.
+    canonical_body = llm_mod._canonical_project_text(body)
+    canonical_company = llm_mod._canonical_project_text("Aegis Labs")
+    # Remove the company name from the body, then check for standalone "aegis".
+    remaining = canonical_body.replace(canonical_company, "")
+    assert "aegis" not in remaining
+
+
+def test_forge_crew_prospect_fallback_uses_company_name():
+    """R3-9: Fallback for Forge Crew Studios may contain the company name."""
+    body = llm_mod._capability_fallback_body("Forge Crew Studios", "fit", "AI agents")
+    assert "Forge Crew Studios" in body
+    canonical_body = llm_mod._canonical_project_text(body)
+    canonical_company = llm_mod._canonical_project_text("Forge Crew Studios")
+    remaining = canonical_body.replace(canonical_company, "")
+    assert "forge crew" not in remaining
+
+
+def test_aegis_prospect_unsafe_angle_with_company_name_allowed():
+    """R3-9: An angle that mentions the prospect's own name (Aegis Labs) is allowed."""
+    angle = llm_mod._sanitize_angle("Aegis Labs AI delivery", company="Aegis Labs")
+    # The angle should be kept because "Aegis" here is part of the company name.
+    assert angle != ""
+    assert "Aegis Labs" in angle
+
+
+def test_aegis_prospect_unsafe_angle_with_sender_proof_rejected():
+    """R3-9: An angle that names Aegis as sender proof (not company) is rejected."""
+    angle = llm_mod._sanitize_angle("Aegis code review agent", company="Aegis Labs")
+    # "Aegis" here is standalone (not "Aegis Labs"), so it should be rejected.
+    assert angle == ""
