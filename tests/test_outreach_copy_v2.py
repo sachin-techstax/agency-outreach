@@ -1693,3 +1693,123 @@ def test_company_name_with_possessive_allowed():
         company="Aegis Labs",
     )
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# R5: Token-aware sender-proof detection with auxiliaries/modifiers
+# ---------------------------------------------------------------------------
+
+def test_i_recently_built_rejected():
+    """R5: 'I recently built Aegis Labs' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I recently built Aegis Labs as a code-review platform.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_i_have_built_rejected():
+    """R5: 'I have built Aegis Labs' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I have built Aegis Labs for autonomous code review.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_ive_recently_built_rejected():
+    """R5: \"I've recently built Aegis Labs\" must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I've recently built Aegis Labs for code review.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_we_built_rejected():
+    """R5: 'We built Aegis Labs' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "We built Aegis Labs for engineering teams.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_i_personally_developed_rejected():
+    """R5: 'I personally developed Aegis Labs' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I personally developed Aegis Labs for code review.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_forge_crew_studios_we_recently_developed_rejected():
+    """R5: Equivalent Forge Crew Studios case with modifier must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "We recently developed Forge Crew Studios for orchestration.",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_i_previously_shipped_rejected():
+    """R5: 'I previously shipped Aegis Labs' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I previously shipped Aegis Labs to production.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_we_also_designed_rejected():
+    """R5: 'We also designed Forge Crew Studios' must be rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "We also designed Forge Crew Studios for multi-agent work.",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_r5_legitimate_recipient_references_remain_allowed():
+    """R5: Legitimate recipient references must still be allowed."""
+    for text, company in [
+        ("Aegis Labs' AI delivery work looks relevant.", "Aegis Labs"),
+        ("Aegis Labs builds AI agents for clients.", "Aegis Labs"),
+        ("Forge Crew Studios works on AI delivery.", "Forge Crew Studios"),
+        ("I looked at Aegis Labs and their AI work is impressive.", "Aegis Labs"),
+    ]:
+        result = llm_mod._contains_forbidden_project(text, company=company)
+        assert result is None, f"False positive for: {text}"
+
+
+def test_r5_non_sender_pronoun_not_rejected():
+    """R5: Company name preceded by non-sender pronoun is allowed."""
+    # "They built" is not first-person sender proof.
+    result = llm_mod._contains_forbidden_project(
+        "They built Aegis Labs for their clients.",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_r5_end_to_end_retry_with_modifier(monkeypatch):
+    """R5: End-to-end — 'I recently built Aegis Labs' triggers corrective retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I recently built Aegis Labs as a code-review platform for teams.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Aegis Labs' AI delivery work looks relevant. I build agentic systems.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
+    assert client.responses.create.call_count == 2
+    assert "Aegis Labs" in body

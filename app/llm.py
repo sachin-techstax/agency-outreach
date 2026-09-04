@@ -109,39 +109,52 @@ def _client() -> OpenAI | None:
     return OpenAI(api_key=settings.openai_api_key)
 
 
-# R3-5/R4: Sender-proof verb phrases (canonical form) that indicate the
-# prospect company name is being used as the sender's own work, not as a
-# recipient identity reference.  Checked against the text immediately
-# preceding a company-name occurrence.
-_SENDER_PROOF_PREFIXES = (
-    "i built ",
-    "i ve built ",
-    "i developed ",
-    "i created ",
-    "i made ",
-    "i shipped ",
-    "i designed ",
-    "i wrote ",
-    "i deployed ",
-)
+# R3-5/R4/R5: Token sets for sender-proof detection.
+# First-person sender pronouns (canonical form).
+_SENDER_PRONOUNS = frozenset({"i", "we"})
+# Proof/action verbs (canonical form) that indicate the company name is
+# being used as the sender's own work.
+_SENDER_PROOF_VERBS = frozenset({
+    "built", "developed", "created", "made", "shipped",
+    "designed", "wrote", "deployed", "built",
+})
+# Auxiliaries/modifiers that may appear between the pronoun and the verb.
+_SENDER_AUXILIARIES = frozenset({
+    "have", "ve", "recently", "personally", "also", "previously",
+    "actually", "just", "now", "already", "had", "been",
+})
+# Maximum token window to examine before a company-name occurrence.
+_SENDER_PROOF_WINDOW = 6
 
 
 def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
-    """R4: Check if any occurrence of the company name is preceded by a
-    sender-proof verb phrase (e.g. ``i built {company}``).
+    """R4/R5: Check if any occurrence of the company name is preceded by a
+    sender-proof pattern within a bounded token window.
 
-    Deterministic — no semantic classification.  Only simple canonical
-    prefix matching is used.
+    A sender-proof pattern is a first-person pronoun (``i`` / ``we``)
+    followed by an optional sequence of auxiliaries/modifiers (``have``,
+    ``recently``, ``personally``, etc.) and then a proof/action verb
+    (``built``, ``developed``, ``created``, etc.).
+
+    Examples detected:
+      ``i built {company}``
+      ``i recently built {company}``
+      ``i have built {company}``
+      ``i ve recently built {company}``
+      ``we built {company}``
+      ``i personally developed {company}``
+
+    Deterministic — no LLM/semantic classifier.  Token boundaries are
+    preserved.  Only a bounded window of up to ``_SENDER_PROOF_WINDOW``
+    tokens before the company-name occurrence is examined.
     """
-    # Search for the company name without the leading space in the needle
-    # so that ``before`` includes the space that precedes the company name.
     company_needle = canonical_company
     idx = 0
     while True:
         pos = haystack.find(company_needle, idx)
         if pos == -1:
             return False
-        # Verify this is a token-boundary match (preceded by space or start).
+        # Verify token-boundary match (preceded by space or start).
         if pos > 0 and haystack[pos - 1] != " ":
             idx = pos + len(company_needle)
             continue
@@ -150,14 +163,36 @@ def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
         if after_pos < len(haystack) and haystack[after_pos] not in (" ", ""):
             idx = pos + len(company_needle)
             continue
-        # Check the text immediately before the company-name occurrence.
-        # ``before`` ends with the space that precedes the company name.
-        before = haystack[:pos]
-        for prefix in _SENDER_PROOF_PREFIXES:
-            # prefix includes trailing space, e.g. "i built "
-            if before.endswith(prefix):
+
+        # Extract a bounded token window before the company-name occurrence.
+        before = haystack[:pos].strip()
+        if before:
+            tokens = before.split()
+            window = tokens[-_SENDER_PROOF_WINDOW:] if len(tokens) > _SENDER_PROOF_WINDOW else tokens
+            if _window_has_sender_proof(window):
                 return True
+
         idx = pos + len(company_needle)
+    return False
+
+
+def _window_has_sender_proof(tokens: list[str]) -> bool:
+    """R5: Check if a token window contains a sender-proof pattern.
+
+    Looks for: pronoun → (auxiliaries)* → verb, in order, within the
+    bounded token list.  The pronoun must appear before the verb, with
+    only auxiliaries/modifiers allowed between them.
+    """
+    n = len(tokens)
+    for i, tok in enumerate(tokens):
+        if tok in _SENDER_PRONOUNS:
+            # Scan forward for a verb, allowing only auxiliaries between.
+            for j in range(i + 1, n):
+                if tokens[j] in _SENDER_PROOF_VERBS:
+                    return True
+                if tokens[j] not in _SENDER_AUXILIARIES:
+                    break  # Non-auxiliary token breaks the pattern.
+            # Also handle pronoun == verb edge case (unlikely but safe).
     return False
 
 
