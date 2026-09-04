@@ -109,44 +109,58 @@ def _client() -> OpenAI | None:
     return OpenAI(api_key=settings.openai_api_key)
 
 
-# R3-5/R4/R5: Token sets for sender-proof detection.
+# R3-5/R4/R5/R6: Token sets for sender-proof detection.
 # First-person sender pronouns (canonical form).
 _SENDER_PRONOUNS = frozenset({"i", "we"})
 # Proof/action verbs (canonical form) that indicate the company name is
 # being used as the sender's own work.
 _SENDER_PROOF_VERBS = frozenset({
     "built", "developed", "created", "made", "shipped",
-    "designed", "wrote", "deployed", "built",
+    "designed", "wrote", "deployed",
 })
 # Auxiliaries/modifiers that may appear between the pronoun and the verb.
 _SENDER_AUXILIARIES = frozenset({
     "have", "ve", "recently", "personally", "also", "previously",
     "actually", "just", "now", "already", "had", "been",
 })
+# Bridge words that may appear between the proof verb and the company name.
+# These are very small determiner/preposition tokens that don't break the
+# structural tie between the verb and the company name.
+_SENDER_BRIDGE_WORDS = frozenset({"the", "a", "an", "our", "my", "this", "that"})
 # Maximum token window to examine before a company-name occurrence.
-_SENDER_PROOF_WINDOW = 6
+_SENDER_PROOF_WINDOW = 8
 
 
 def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
-    """R4/R5: Check if any occurrence of the company name is preceded by a
-    sender-proof pattern within a bounded token window.
+    """R4/R5/R6: Check if any occurrence of the company name is directly
+    preceded by a sender-proof pattern.
 
-    A sender-proof pattern is a first-person pronoun (``i`` / ``we``)
-    followed by an optional sequence of auxiliaries/modifiers (``have``,
-    ``recently``, ``personally``, etc.) and then a proof/action verb
-    (``built``, ``developed``, ``created``, etc.).
+    R6 fix: The proof verb must be structurally tied to the company-name
+    occurrence — it must be the last non-bridge token before the company
+    name (or separated only by bridge words like ``the`` / ``a``).  This
+    prevents false positives where the verb appears earlier in the window
+    but acts on a different object (e.g. ``I've built agentic systems,
+    and Aegis Labs' work...``).
 
-    Examples detected:
+    The anchored pattern is:
+      pronoun → (auxiliaries)* → verb → (bridge words)* → COMPANY
+
+    Examples detected (rejected):
       ``i built {company}``
       ``i recently built {company}``
       ``i have built {company}``
       ``i ve recently built {company}``
       ``we built {company}``
       ``i personally developed {company}``
+      ``i built the {company} platform``
+
+    Examples NOT detected (allowed):
+      ``i ve built agentic systems and {company}' work...``
+      ``i built integrations for {company}``
+      ``we developed ai workflows relevant to {company}``
 
     Deterministic — no LLM/semantic classifier.  Token boundaries are
-    preserved.  Only a bounded window of up to ``_SENDER_PROOF_WINDOW``
-    tokens before the company-name occurrence is examined.
+    preserved.
     """
     company_needle = canonical_company
     idx = 0
@@ -164,7 +178,7 @@ def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
             idx = pos + len(company_needle)
             continue
 
-        # Extract a bounded token window before the company-name occurrence.
+        # Extract the token sequence immediately before the company name.
         before = haystack[:pos].strip()
         if before:
             tokens = before.split()
@@ -177,22 +191,44 @@ def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
 
 
 def _window_has_sender_proof(tokens: list[str]) -> bool:
-    """R5: Check if a token window contains a sender-proof pattern.
+    """R6: Check if a token window ends with an anchored sender-proof pattern.
 
-    Looks for: pronoun → (auxiliaries)* → verb, in order, within the
-    bounded token list.  The pronoun must appear before the verb, with
-    only auxiliaries/modifiers allowed between them.
+    The pattern must be anchored to the END of the token sequence
+    (i.e. immediately before the company name):
+
+      pronoun → (auxiliaries)* → verb → (bridge words)*
+
+    The verb must be the last non-bridge token in the window.  Bridge
+    words (``the``, ``a``, ``an``, ``our``, ``my``, ``this``, ``that``)
+    may appear between the verb and the company name.  No other tokens
+    may appear after the verb except bridge words.
+
+    This prevents false positives where the verb acts on a different
+    object earlier in the sentence (e.g. ``I built integrations for
+    {company}`` — ``for`` is not a bridge word, so the pattern breaks).
     """
     n = len(tokens)
-    for i, tok in enumerate(tokens):
-        if tok in _SENDER_PRONOUNS:
-            # Scan forward for a verb, allowing only auxiliaries between.
-            for j in range(i + 1, n):
-                if tokens[j] in _SENDER_PROOF_VERBS:
-                    return True
-                if tokens[j] not in _SENDER_AUXILIARIES:
-                    break  # Non-auxiliary token breaks the pattern.
-            # Also handle pronoun == verb edge case (unlikely but safe).
+    if n < 2:
+        return False
+
+    # Step 1: Strip trailing bridge words to find the last non-bridge token.
+    # That token must be a proof verb.
+    end = n - 1
+    while end >= 0 and tokens[end] in _SENDER_BRIDGE_WORDS:
+        end -= 1
+    if end < 1:
+        return False
+    if tokens[end] not in _SENDER_PROOF_VERBS:
+        return False
+
+    # Step 2: Scan backward from the verb for a pronoun, allowing only
+    # auxiliaries/modifiers between the pronoun and the verb.
+    for j in range(end - 1, -1, -1):
+        if tokens[j] in _SENDER_PRONOUNS:
+            return True
+        if tokens[j] not in _SENDER_AUXILIARIES:
+            break  # Non-auxiliary token breaks the pattern.
+
     return False
 
 

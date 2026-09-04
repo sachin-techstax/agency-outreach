@@ -1813,3 +1813,137 @@ def test_r5_end_to_end_retry_with_modifier(monkeypatch):
     subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
     assert client.responses.create.call_count == 2
     assert "Aegis Labs" in body
+
+
+# ---------------------------------------------------------------------------
+# R6: Anchored sender-proof detection — no false positives on legitimate
+# prospect references where a proof verb appears earlier in the window
+# but acts on a different object.
+# ---------------------------------------------------------------------------
+
+def test_r6_ive_built_agentic_systems_allowed():
+    """R6: 'I've built agentic systems, and Aegis Labs' work...' is allowed."""
+    result = llm_mod._contains_forbidden_project(
+        "I've built agentic systems, and Aegis Labs' work looks relevant.",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_r6_i_built_integrations_for_allowed():
+    """R6: 'I built integrations for Aegis Labs.' is allowed."""
+    result = llm_mod._contains_forbidden_project(
+        "I built integrations for Aegis Labs.",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_r6_we_developed_workflows_relevant_to_allowed():
+    """R6: 'We developed AI workflows relevant to Aegis Labs.' is allowed."""
+    result = llm_mod._contains_forbidden_project(
+        "We developed AI workflows relevant to Aegis Labs.",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_r6_i_built_the_aegis_labs_platform_rejected():
+    """R6: 'I built the Aegis Labs platform' is rejected (bridge word 'the')."""
+    result = llm_mod._contains_forbidden_project(
+        "I built the Aegis Labs platform.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_i_designed_our_aegis_labs_rejected():
+    """R6: 'I designed our Aegis Labs' is rejected (bridge word 'our')."""
+    result = llm_mod._contains_forbidden_project(
+        "I designed our Aegis Labs system.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_forge_crew_studios_built_integrations_for_allowed():
+    """R6: Forge Crew Studios equivalent false-positive case is allowed."""
+    result = llm_mod._contains_forbidden_project(
+        "I built integrations for Forge Crew Studios.",
+        company="Forge Crew Studios",
+    )
+    assert result is None
+
+
+def test_r6_forge_crew_studios_developed_workflows_relevant_to_allowed():
+    """R6: Forge Crew Studios equivalent false-positive case is allowed."""
+    result = llm_mod._contains_forbidden_project(
+        "We developed AI workflows relevant to Forge Crew Studios.",
+        company="Forge Crew Studios",
+    )
+    assert result is None
+
+
+def test_r6_preserves_i_built_aegis_labs_rejected():
+    """R6: R4 true positive 'I built Aegis Labs' still rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Aegis Labs as a code-review platform.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_preserves_i_recently_built_rejected():
+    """R6: R5 true positive 'I recently built Aegis Labs' still rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I recently built Aegis Labs for code review.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_preserves_we_built_rejected():
+    """R6: R5 true positive 'We built Aegis Labs' still rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "We built Aegis Labs for engineering teams.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_preserves_i_personally_developed_rejected():
+    """R6: R5 true positive 'I personally developed Aegis Labs' still rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I personally developed Aegis Labs for code review.",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_r6_preserves_forge_crew_studios_sender_proof_rejected():
+    """R6: R4 true positive for Forge Crew Studios still rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Forge Crew Studios for multi-agent orchestration.",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_r6_end_to_end_legitimate_sentence_no_retry(monkeypatch):
+    """R6: End-to-end — a legitimate sentence with an earlier proof verb
+    does NOT trigger a corrective retry."""
+    _set_openai_key("test-key")
+
+    resp = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I've built agentic systems, and Aegis Labs' work looks relevant.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.return_value = resp
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
+    # No retry — the body is a legitimate prospect reference.
+    assert client.responses.create.call_count == 1
+    assert "Aegis Labs" in body
