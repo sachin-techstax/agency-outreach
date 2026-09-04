@@ -566,7 +566,9 @@ def run(
                 analysis.get("outreach_angle", ""),
             )
             outreach_drafts_generated += 1
-            update_lead(lead_id, subject=subject, draft=body, status="drafted")
+            # R1-4: A newly generated draft is fresh against the research
+            # that generated it.  Explicitly clear stale state.
+            update_lead(lead_id, subject=subject, draft=body, status="drafted", draft_stale=0)
             drafted += 1
             logger.info("Draft created for %s", domain)
             processed += 1
@@ -686,6 +688,17 @@ def _log_summary(summary: dict) -> None:
 # Per-lead research refresh (protected-state safe)
 # ---------------------------------------------------------------------------
 
+def _normalize_for_compare(value) -> str:
+    """Normalize a research field value for staleness comparison.
+
+    Strips whitespace and lowercases so trivial formatting differences do not
+    trigger a false stale marker.  ``None`` is treated as empty string.
+    """
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 # Fields that represent human workflow decisions and must NEVER be touched by
 # an automated research refresh, regardless of lead status.  This is a stricter
 # invariant than the upsert_lead protection: refresh never regenerates outreach
@@ -698,6 +711,20 @@ _REFRESH_PROTECTED_FIELDS = frozenset({
     "last_contact_at",
     "followup_due_at",
 })
+
+
+def _refresh_message(contact_refreshed: bool, draft_marked_stale: bool) -> str:
+    """R1-15: Compose a coherent operator-facing refresh feedback message."""
+    if contact_refreshed and draft_marked_stale:
+        return (
+            "Contact updated. Research changed and the outreach draft "
+            "needs regeneration."
+        )
+    if draft_marked_stale:
+        return "Research refreshed. Existing outreach draft needs regeneration."
+    if contact_refreshed:
+        return "Contact updated."
+    return "Research refreshed."
 
 
 def refresh_lead_research(lead_id: int) -> dict:
@@ -720,6 +747,15 @@ def refresh_lead_research(lead_id: int) -> dict:
       is either missing today or strictly higher quality than the existing
       one.  This lets a refresh recover a missed contact (e.g. LaunchPad Lab)
       without downgrading an already-good contact.
+
+    Draft freshness (R-draft-freshness):
+    - When a draft already exists (``subject`` non-empty) AND any
+      draft-driving research field has changed, the draft is marked stale
+      (``draft_stale=1``).  The draft body itself is NEVER modified by
+      refresh.  The operator must explicitly regenerate the draft via the
+      dedicated regeneration endpoint.
+    - When no draft exists, or when research is unchanged, ``draft_stale``
+      is left at 0.
 
     Returns a summary dict describing what was refreshed.
     """
@@ -758,6 +794,7 @@ def refresh_lead_research(lead_id: int) -> dict:
     analysis = analyze_agency(company, site["root"], site["text"])
 
     # Research metadata is always safe to refresh.
+    new_proof = analysis.get("proof_project", existing["proof_project"] or "WingerX")
     updates = {
         "company": company,
         "website": site["root"],
@@ -766,7 +803,7 @@ def refresh_lead_research(lead_id: int) -> dict:
         "summary": analysis.get("summary", ""),
         "services": analysis.get("services", ""),
         "fit_reason": analysis.get("fit_reason", ""),
-        "proof_project": analysis.get("proof_project", existing["proof_project"] or "WingerX"),
+        "proof_project": new_proof,
         "outreach_angle": analysis.get("outreach_angle", ""),
     }
 
@@ -796,6 +833,36 @@ def refresh_lead_research(lead_id: int) -> dict:
     # if a caller accidentally included them.
     updates = {k: v for k, v in updates.items() if k not in _REFRESH_PROTECTED_FIELDS}
 
+    # R1-3: Require an actual draft BODY (not just a stray subject) before
+    # marking stale.  A stray subject with no draft body must not create a
+    # stale-draft workflow.
+    has_draft = bool((existing["draft"] or "").strip())
+    draft_marked_stale = False
+    if has_draft:
+        # R1-2: Only fields that actually drive draft_outreach() composition
+        # trigger a stale marker.  The draft call is:
+        #   draft_outreach(company, fit_reason, proof_project, outreach_angle)
+        # Changes to summary, services, score, etc. do NOT affect the draft
+        # body and must NOT mark it stale.
+        draft_driving_fields = (
+            "company",
+            "fit_reason",
+            "proof_project",
+            "outreach_angle",
+        )
+        research_changed = any(
+            _normalize_for_compare(updates.get(f)) != _normalize_for_compare(existing[f])
+            for f in draft_driving_fields
+            if f in updates and f in existing.keys()
+        )
+        if research_changed:
+            updates["draft_stale"] = 1
+            draft_marked_stale = True
+            logger.info(
+                "Refresh marked existing draft stale for %s (research changed)",
+                domain,
+            )
+
     update_lead(lead_id, **updates)
     logger.info("Refreshed research for lead id=%s domain=%s", lead_id, domain)
 
@@ -808,4 +875,163 @@ def refresh_lead_research(lead_id: int) -> dict:
         "contact_email": new_email if contact_refreshed else old_email,
         "contact_source": contact.get("contact_source", "") if contact_refreshed else existing["contact_source"],
         "contact_quality": new_quality if contact_refreshed else old_quality,
+        "draft_marked_stale": draft_marked_stale,
+        # R1-15: Coherent feedback message for the operator.
+        "message": _refresh_message(contact_refreshed, draft_marked_stale),
+    }
+
+
+class RegenerationBlocked(Exception):
+    """Raised when regeneration is not permitted for the current lead state,
+    or when a concurrent modification caused the optimistic-concurrency
+    conditional update to fail (R2-1/R2-2).
+
+    The message is safe to surface to the API caller (no secrets).
+    """
+
+    def __init__(self, message: str, status_code: int = 409):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def regenerate_draft(lead_id: int) -> dict:
+    """Explicitly regenerate the outreach draft from current research.
+
+    This is a human-triggered action (via the dedicated API endpoint), NOT
+    something refresh does automatically.  It re-composes the outreach
+    subject/body from the lead's current research fields (company,
+    fit_reason, proof_project, outreach_angle) and clears the stale flag.
+
+    R1-5 Preconditions (all must hold):
+      - lead exists
+      - non-empty existing draft body
+      - draft_stale == true
+      - workflow status allows regeneration (drafted/rejected/approved)
+      - sufficient persisted research exists
+      - no existing Gmail draft (status != gmail_drafted AND
+        gmail_draft_id is empty)
+
+    R1-6 Status transition matrix:
+      drafted    + stale -> regenerate -> drafted, fresh
+      rejected   + stale -> regenerate -> drafted, fresh
+      approved   + stale -> regenerate -> drafted, fresh (approval revoked)
+      gmail_drafted + stale -> BLOCK (409)
+      sent           + stale -> BLOCK (409)
+      do_not_contact + stale -> BLOCK (409)
+      any fresh draft           -> BLOCK (409)
+
+    R1-7: Approved regeneration revokes approval (approved -> drafted).
+    R1-8: Never regenerate around an existing Gmail draft.
+    R1-11: Regeneration only modifies subject, draft, draft_stale, status,
+           updated_at.  It must NOT touch gmail_draft_id, contact fields,
+           follow-up dates, or research fields, and must NOT call Gmail,
+           Serper, analyze_agency, or any send/mark-sent logic.
+
+    Returns a summary dict describing the regeneration.
+    """
+    from .db import get_lead as _get_lead
+    existing = _get_lead(lead_id)
+    if not existing:
+        raise RegenerationBlocked(f"Lead {lead_id} not found", status_code=404)
+
+    domain = existing["domain"]
+    status = existing["status"]
+    draft_body = (existing["draft"] or "").strip()
+    is_stale = bool(existing["draft_stale"])
+    gmail_draft_id = (existing["gmail_draft_id"] or "").strip()
+
+    # R1-5: Require a non-empty existing draft body.
+    if not draft_body:
+        raise RegenerationBlocked(
+            "Lead has no existing outreach draft to regenerate."
+        )
+
+    # R1-5: Require draft_stale == true.
+    if not is_stale:
+        raise RegenerationBlocked(
+            "Current outreach draft is already up to date."
+        )
+
+    # R1-6 / R1-8: Block regeneration for protected workflow states.
+    if status in {"gmail_drafted", "sent", "do_not_contact"}:
+        raise RegenerationBlocked(
+            f"Lead status is '{status}'; outreach cannot be regenerated."
+        )
+
+    # R1-8: Defensively block if a Gmail draft already exists, even when
+    # status is 'approved' (the operator may have created a Gmail draft
+    # out-of-band and then reverted the status).
+    if gmail_draft_id:
+        raise RegenerationBlocked(
+            "Lead already has a Gmail draft; outreach cannot be regenerated safely."
+        )
+
+    # R1-6: Only drafted/rejected/approved allow regeneration at this point.
+    if status not in {"drafted", "rejected", "approved"}:
+        raise RegenerationBlocked(
+            f"Lead status '{status}' does not allow draft regeneration."
+        )
+
+    # R1-5: Require sufficient persisted research to compose a draft.
+    company = existing["company"] or domain
+    fit_reason = existing["fit_reason"] or ""
+    proof_project = existing["proof_project"] or ""
+    outreach_angle = existing["outreach_angle"] or ""
+    if not (company and fit_reason and proof_project and outreach_angle):
+        raise RegenerationBlocked(
+            "Lead has insufficient research to regenerate a draft."
+        )
+
+    logger.info("Regenerating outreach draft for lead id=%s domain=%s", lead_id, domain)
+
+    # R2-1: Take a snapshot of the state that must NOT change during the
+    # (potentially slow) draft_outreach() / OpenAI call.  The conditional
+    # UPDATE after the call will fail if any of these fields changed,
+    # preventing TOCTOU races.
+    snapshot_status = status
+    snapshot_draft = draft_body
+    snapshot_company = company
+    snapshot_fit_reason = fit_reason
+    snapshot_proof_project = proof_project
+    snapshot_outreach_angle = outreach_angle
+
+    # R1-11: Only draft_outreach() is called.  No Gmail, Serper, or
+    # analyze_agency calls.
+    subject, body = draft_outreach(company, fit_reason, proof_project, outreach_angle)
+
+    # R2-1: Optimistic-concurrency conditional UPDATE.  The write succeeds
+    # ONLY if the lead's relevant state still matches the snapshot.  If a
+    # concurrent workflow action (do-not-contact, Gmail draft, etc.) or a
+    # research refresh changed any draft-driving field, the update affects
+    # zero rows and we return a controlled 409 conflict.
+    from .db import replace_stale_draft_if_current
+    updated = replace_stale_draft_if_current(
+        lead_id,
+        expected_status=snapshot_status,
+        expected_draft=snapshot_draft,
+        expected_company=snapshot_company,
+        expected_fit_reason=snapshot_fit_reason,
+        expected_proof_project=snapshot_proof_project,
+        expected_outreach_angle=snapshot_outreach_angle,
+        subject=subject,
+        draft=body,
+    )
+
+    # R2-2: If the conditional update failed, do NOT overwrite newer state.
+    # The generated draft is discarded — correctness over reusing stale output.
+    if not updated:
+        raise RegenerationBlocked(
+            "Lead changed while the draft was being regenerated. "
+            "Review the latest lead state and try again."
+        )
+
+    logger.info("Regenerated outreach draft for lead id=%s domain=%s", lead_id, domain)
+
+    return {
+        "lead_id": lead_id,
+        "domain": domain,
+        "regenerated": True,
+        "subject": subject,
+        "status": "drafted",
+        "draft_stale": False,
     }

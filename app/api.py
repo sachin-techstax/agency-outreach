@@ -42,7 +42,13 @@ from .db import (
 )
 from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
 from .gmail_client import create_draft
-from .pipeline import discover_only, refresh_lead_research, run as run_pipeline
+from .pipeline import (
+    RegenerationBlocked,
+    discover_only,
+    refresh_lead_research,
+    regenerate_draft,
+    run as run_pipeline,
+)
 
 logger = get_logger("api")
 
@@ -128,6 +134,8 @@ def _serialize_lead(row: Any) -> dict:
     data = dict(row)
     data["services_list"] = _parse_list(data.get("services"))
     data["score_reason_list"] = _parse_list(data.get("score_reasons"))
+    # draft_stale is stored as INTEGER (0/1); expose as boolean for the API.
+    data["draft_stale"] = bool(data.get("draft_stale", 0))
     return data
 
 
@@ -137,6 +145,7 @@ def _demo_lead(lead_id: int) -> dict:
             data = dict(lead)
             data["services_list"] = _parse_list(data.get("services"))
             data["score_reason_list"] = _parse_list(data.get("score_reasons"))
+            data["draft_stale"] = bool(data.get("draft_stale", 0))
             return data
     raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -477,6 +486,13 @@ def approve(lead_id: int) -> dict:
     lead = _live_lead(lead_id)
     if lead["status"] not in {"drafted", "rejected"} or not lead.get("draft"):
         raise HTTPException(status_code=409, detail="Lead must have a draft before approval")
+    # R1-9: Block approval of a stale draft.  The operator must regenerate
+    # the draft before it can be approved.
+    if lead.get("draft_stale"):
+        raise HTTPException(
+            status_code=409,
+            detail="Outreach draft is stale. Regenerate it before approval.",
+        )
     update_lead(lead_id, status="approved")
     return _live_lead(lead_id)
 
@@ -517,6 +533,15 @@ def gmail_draft(lead_id: int) -> dict:
         raise HTTPException(status_code=409, detail="Lead has no public contact email")
     if not lead.get("subject") or not lead.get("draft"):
         raise HTTPException(status_code=409, detail="Lead has no outreach draft")
+    # R1-10: Block Gmail draft creation for a stale outreach draft.  The
+    # operator must regenerate and re-approve before creating a Gmail draft.
+    # This is enforced BEFORE calling create_draft() so no Gmail API call
+    # is made.
+    if lead.get("draft_stale"):
+        raise HTTPException(
+            status_code=409,
+            detail="Outreach draft is stale. Regenerate and approve it before creating a Gmail draft.",
+        )
     draft_id = create_draft(lead["contact_email"], lead["subject"], lead["draft"])
     update_lead(lead_id, gmail_draft_id=draft_id, status="gmail_drafted")
     return _live_lead(lead_id)
@@ -546,6 +571,11 @@ def refresh_research(lead_id: int) -> dict:
     Protected workflow state (status, draft, gmail_draft_id, follow-up dates)
     is never modified.  Contact fields are updated only when the refresh
     discovers a better contact than the one currently stored.
+
+    When a draft already exists and any draft-driving research field has
+    changed, the draft is marked stale (``draft_stale=1``).  The draft body
+    is never modified by refresh — the operator must explicitly regenerate
+    via ``POST /api/leads/{id}/regenerate-draft``.
     """
     _require_live_mode()
     lead = _live_lead(lead_id)
@@ -554,10 +584,47 @@ def refresh_research(lead_id: int) -> dict:
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Research refresh failed: {type(exc).__name__}: {exc}",
+            detail=f"Research refresh failed: {type(exc).__name__}",
         ) from exc
     refreshed = _live_lead(lead_id)
     return {"refresh": result, "lead": refreshed}
+
+
+@app.post("/api/leads/{lead_id}/regenerate-draft")
+def regenerate_draft_endpoint(lead_id: int) -> dict:
+    """Explicitly regenerate the outreach draft from current research.
+
+    This is a human-triggered action.  It re-composes the outreach
+    subject/body from the lead's current research fields and clears the
+    stale flag.
+
+    R1-5: Requires a stale existing draft body.  Returns 409 if the draft
+    is already fresh or no draft exists (no OpenAI call is made).
+    R1-6/R1-7: Regeneration returns the lead to 'drafted' (approval is
+    revoked if it was 'approved').
+    R1-8: Blocks if a Gmail draft already exists.
+    R1-12: Demo mode is blocked before any LLM work.
+    R1-17: Errors are sanitized — raw exception text is never returned.
+    """
+    # R1-12: Block demo mode BEFORE any LLM work.
+    _require_live_mode()
+    lead = _live_lead(lead_id)
+    try:
+        result = regenerate_draft(lead_id)
+    except RegenerationBlocked as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        # R1-17: Sanitize — never expose raw exception text or secrets.
+        logger.exception("Draft regeneration failed for lead %s", lead_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Draft regeneration failed: {type(exc).__name__}",
+        ) from exc
+    refreshed = _live_lead(lead_id)
+    return {"regenerate": result, "lead": refreshed}
 
 
 @app.post("/api/runs/discovery")

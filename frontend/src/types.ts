@@ -24,6 +24,7 @@ export type Lead = {
   draft?: string;
   status: string;
   gmail_draft_id?: string;
+  draft_stale?: boolean;
   created_at?: string;
   updated_at?: string;
   last_contact_at?: string | null;
@@ -170,6 +171,18 @@ export type RefreshResult = {
     contact_source?: string;
     contact_quality?: string;
     reason?: string;
+    draft_marked_stale?: boolean;
+    message?: string;
+  };
+  lead: Lead;
+};
+
+export type RegenerateResult = {
+  regenerate: {
+    lead_id: number;
+    domain: string;
+    regenerated: boolean;
+    subject?: string;
   };
   lead: Lead;
 };

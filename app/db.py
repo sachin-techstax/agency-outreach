@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS leads (
     draft TEXT,
     status TEXT NOT NULL DEFAULT 'discovered',
     gmail_draft_id TEXT,
+    draft_stale INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_contact_at TEXT,
@@ -174,6 +175,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 # Columns to add if they don't exist (backward-compatible migration).
 _MIGRATION_COLUMNS = [
     ("contact_quality", "TEXT"),
+    ("draft_stale", "INTEGER DEFAULT 0"),
 ]
 
 # Columns to add to the ``runs`` table if missing in older database files.
@@ -183,12 +185,36 @@ _RUN_MIGRATION_COLUMNS = [
 
 
 def _migrate(db: sqlite3.Connection) -> None:
-    """Add columns that may be missing in older database files."""
+    """Add columns that may be missing in older database files.
+
+    When the ``draft_stale`` column is first added to an existing production
+    database, existing drafts that predate freshness tracking cannot be
+    trusted as fresh.  The migration marks existing rows stale where:
+      - ``draft`` is non-empty
+      - ``status`` is one of ``drafted``, ``rejected``, ``approved``
+    (i.e. statuses where regeneration is a meaningful operator action).
+    Rows in ``gmail_drafted``, ``sent``, or ``do_not_contact`` are NOT
+    marked stale by migration — those represent workflow states where
+    regeneration is not the expected next step.
+    """
     cols = {row["name"] for row in db.execute("PRAGMA table_info(leads)").fetchall()}
     for col_name, col_type in _MIGRATION_COLUMNS:
         if col_name not in cols:
             db.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_type}")
             logger.debug("Added column %s to leads table", col_name)
+            # R1-1: When draft_stale is first added, mark existing
+            # regeneratable drafts stale.  Existing production drafts
+            # predate freshness tracking and cannot be trusted as fresh.
+            if col_name == "draft_stale":
+                db.execute(
+                    "UPDATE leads SET draft_stale = 1 "
+                    "WHERE COALESCE(draft, '') <> '' "
+                    "AND status IN ('drafted', 'rejected', 'approved')"
+                )
+                logger.info(
+                    "Migration: marked existing regeneratable drafts stale "
+                    "(draft_stale=1 for drafted/rejected/approved with non-empty draft)"
+                )
     run_cols = {row["name"] for row in db.execute("PRAGMA table_info(runs)").fetchall()}
     for col_name, col_type in _RUN_MIGRATION_COLUMNS:
         if col_name not in run_cols:
@@ -333,6 +359,89 @@ def update_lead(lead_id: int, **updates) -> None:
 def get_lead(lead_id: int):
     with conn() as db:
         return db.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+
+
+def replace_stale_draft_if_current(
+    lead_id: int,
+    *,
+    expected_status: str,
+    expected_draft: str,
+    expected_company: str,
+    expected_fit_reason: str,
+    expected_proof_project: str,
+    expected_outreach_angle: str,
+    subject: str,
+    draft: str,
+) -> bool:
+    """R2-1: Optimistic-concurrency conditional update for draft regeneration.
+
+    Atomically replaces the stale draft ONLY if the lead's relevant state
+    still matches the snapshot taken before the (slow) ``draft_outreach()``
+    call.  This prevents TOCTOU races where a human workflow action or a
+    research refresh modifies the lead during the LLM call.
+
+    The UPDATE succeeds only when ALL of the following still hold:
+      - ``id`` matches
+      - ``status`` matches (drafted/rejected/approved — not mutated to
+        do_not_contact/gmail_drafted/sent by a concurrent action)
+      - ``draft_stale`` is still 1 (not cleared by a concurrent regeneration)
+      - ``gmail_draft_id`` is still empty (no concurrent Gmail draft)
+      - ``draft`` body is unchanged (no concurrent regeneration wrote a new one)
+      - ``company``, ``fit_reason``, ``proof_project``, ``outreach_angle``
+        are unchanged (no concurrent research refresh changed draft-driving
+        fields)
+
+    Contact fields, score, summary, and services are intentionally NOT
+    checked because they do not affect the generated draft.
+
+    Returns ``True`` if exactly one row was updated, ``False`` on conflict.
+    """
+    init_db()
+    timestamp = now_iso()
+    with conn() as db:
+        cur = db.execute(
+            """
+            UPDATE leads
+            SET subject = ?,
+                draft = ?,
+                draft_stale = 0,
+                status = 'drafted',
+                updated_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND draft_stale = 1
+              AND COALESCE(gmail_draft_id, '') = ''
+              AND COALESCE(draft, '') = ?
+              AND COALESCE(company, '') = ?
+              AND COALESCE(fit_reason, '') = ?
+              AND COALESCE(proof_project, '') = ?
+              AND COALESCE(outreach_angle, '') = ?
+            """,
+            (
+                subject,
+                draft,
+                timestamp,
+                lead_id,
+                expected_status,
+                expected_draft,
+                expected_company,
+                expected_fit_reason,
+                expected_proof_project,
+                expected_outreach_angle,
+            ),
+        )
+        updated = cur.rowcount == 1
+    if updated:
+        logger.debug(
+            "Optimistic draft replacement succeeded for lead id=%s", lead_id
+        )
+    else:
+        logger.info(
+            "Optimistic draft replacement conflicted for lead id=%s "
+            "(lead changed during regeneration)",
+            lead_id,
+        )
+    return updated
 
 
 def get_lead_by_domain(domain: str):
