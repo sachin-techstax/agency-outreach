@@ -686,6 +686,17 @@ def _log_summary(summary: dict) -> None:
 # Per-lead research refresh (protected-state safe)
 # ---------------------------------------------------------------------------
 
+def _normalize_for_compare(value) -> str:
+    """Normalize a research field value for staleness comparison.
+
+    Strips whitespace and lowercases so trivial formatting differences do not
+    trigger a false stale marker.  ``None`` is treated as empty string.
+    """
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 # Fields that represent human workflow decisions and must NEVER be touched by
 # an automated research refresh, regardless of lead status.  This is a stricter
 # invariant than the upsert_lead protection: refresh never regenerates outreach
@@ -720,6 +731,15 @@ def refresh_lead_research(lead_id: int) -> dict:
       is either missing today or strictly higher quality than the existing
       one.  This lets a refresh recover a missed contact (e.g. LaunchPad Lab)
       without downgrading an already-good contact.
+
+    Draft freshness (R-draft-freshness):
+    - When a draft already exists (``subject`` non-empty) AND any
+      draft-driving research field has changed, the draft is marked stale
+      (``draft_stale=1``).  The draft body itself is NEVER modified by
+      refresh.  The operator must explicitly regenerate the draft via the
+      dedicated regeneration endpoint.
+    - When no draft exists, or when research is unchanged, ``draft_stale``
+      is left at 0.
 
     Returns a summary dict describing what was refreshed.
     """
@@ -758,6 +778,7 @@ def refresh_lead_research(lead_id: int) -> dict:
     analysis = analyze_agency(company, site["root"], site["text"])
 
     # Research metadata is always safe to refresh.
+    new_proof = analysis.get("proof_project", existing["proof_project"] or "WingerX")
     updates = {
         "company": company,
         "website": site["root"],
@@ -766,7 +787,7 @@ def refresh_lead_research(lead_id: int) -> dict:
         "summary": analysis.get("summary", ""),
         "services": analysis.get("services", ""),
         "fit_reason": analysis.get("fit_reason", ""),
-        "proof_project": analysis.get("proof_project", existing["proof_project"] or "WingerX"),
+        "proof_project": new_proof,
         "outreach_angle": analysis.get("outreach_angle", ""),
     }
 
@@ -796,6 +817,38 @@ def refresh_lead_research(lead_id: int) -> dict:
     # if a caller accidentally included them.
     updates = {k: v for k, v in updates.items() if k not in _REFRESH_PROTECTED_FIELDS}
 
+    # Draft freshness: detect whether any draft-driving research field has
+    # changed.  If a draft already exists and the research that drives draft
+    # composition has shifted, mark the draft stale so the operator is warned
+    # and can explicitly regenerate.  The draft body is NEVER modified here.
+    has_draft = bool(existing["subject"] or existing["draft"])
+    draft_marked_stale = False
+    if has_draft:
+        # Fields that directly influence the outreach draft composition.
+        # ``proof_project`` is the most impactful (it changes the proof
+        # example cited in the email), but company, fit_reason,
+        # outreach_angle, summary, and services all feed the draft prompt.
+        draft_driving_fields = (
+            "company",
+            "summary",
+            "services",
+            "fit_reason",
+            "proof_project",
+            "outreach_angle",
+        )
+        research_changed = any(
+            _normalize_for_compare(updates.get(f)) != _normalize_for_compare(existing[f])
+            for f in draft_driving_fields
+            if f in updates and f in existing.keys()
+        )
+        if research_changed:
+            updates["draft_stale"] = 1
+            draft_marked_stale = True
+            logger.info(
+                "Refresh marked existing draft stale for %s (research changed)",
+                domain,
+            )
+
     update_lead(lead_id, **updates)
     logger.info("Refreshed research for lead id=%s domain=%s", lead_id, domain)
 
@@ -808,4 +861,50 @@ def refresh_lead_research(lead_id: int) -> dict:
         "contact_email": new_email if contact_refreshed else old_email,
         "contact_source": contact.get("contact_source", "") if contact_refreshed else existing["contact_source"],
         "contact_quality": new_quality if contact_refreshed else old_quality,
+        "draft_marked_stale": draft_marked_stale,
+    }
+
+
+def regenerate_draft(lead_id: int) -> dict:
+    """Explicitly regenerate the outreach draft from current research.
+
+    This is a human-triggered action (via the dedicated API endpoint), NOT
+    something refresh does automatically.  It re-composes the outreach
+    subject/body from the lead's current research fields (proof_project,
+    fit_reason, outreach_angle, company) and clears the stale flag.
+
+    Safety invariants:
+    - Workflow status is NEVER changed by regeneration.  A lead that was
+      ``approved`` stays ``approved``; the operator must re-review the fresh
+      draft before proceeding to Gmail.
+    - ``gmail_draft_id`` is NEVER touched.  If a Gmail draft was already
+      created from the old outreach draft, the operator is responsible for
+      reconciling that out-of-band.
+    - ``last_contact_at`` and ``followup_due_at`` are NEVER touched.
+    - Contact fields are NEVER touched.
+
+    Returns a summary dict describing the regeneration.
+    """
+    from .db import get_lead as _get_lead
+    existing = _get_lead(lead_id)
+    if not existing:
+        raise ValueError(f"Lead {lead_id} not found")
+
+    domain = existing["domain"]
+    company = existing["company"] or domain
+    fit_reason = existing["fit_reason"] or ""
+    proof_project = existing["proof_project"] or "WingerX"
+    outreach_angle = existing["outreach_angle"] or ""
+
+    logger.info("Regenerating outreach draft for lead id=%s domain=%s", lead_id, domain)
+
+    subject, body = draft_outreach(company, fit_reason, proof_project, outreach_angle)
+    update_lead(lead_id, subject=subject, draft=body, draft_stale=0)
+    logger.info("Regenerated outreach draft for lead id=%s domain=%s", lead_id, domain)
+
+    return {
+        "lead_id": lead_id,
+        "domain": domain,
+        "regenerated": True,
+        "subject": subject,
     }

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, RefreshCw } from "lucide-react";
+import { AlertTriangle, ExternalLink, RefreshCw, RotateCcw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
@@ -31,6 +31,15 @@ export function LeadReviewPage() {
     }
   });
 
+  const regenerate = useMutation({
+    mutationFn: () => api.regenerateDraft(id),
+    onSuccess: (value) => {
+      queryClient.setQueryData(["lead", id], value.lead);
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }
+  });
+
   if (lead.isLoading) return <div className="full-page-message">Loading lead…</div>;
   if (lead.error || !lead.data) return <div className="full-page-message error">{(lead.error as Error)?.message ?? "Lead not found"}</div>;
 
@@ -38,7 +47,9 @@ export function LeadReviewPage() {
   const demoMode = Boolean(meta.data?.demo_mode);
   const disabled = demoMode || mutate.isPending;
   const refreshDisabled = demoMode || refresh.isPending;
+  const regenerateDisabled = demoMode || regenerate.isPending;
   const primary = primaryAction(item.status);
+  const draftStale = Boolean(item.draft_stale);
 
   return (
     <>
@@ -82,6 +93,7 @@ export function LeadReviewPage() {
             {refresh.isPending ? "Refreshing…" : "Refresh contact & research"}
           </button>
           {refresh.data && <p className="preview-foot">{refresh.data.refresh.contact_refreshed ? `Contact updated: ${refresh.data.refresh.contact_email}` : refresh.data.refresh.refreshed ? "Research refreshed" : "Refresh failed"}</p>}
+          {refresh.data?.refresh.draft_marked_stale && <p className="preview-foot stale-note">Draft marked stale — research changed. Review and regenerate below.</p>}
           {refresh.error && <div className="error-banner compact">{(refresh.error as Error).message}</div>}
         </aside>
 
@@ -98,10 +110,36 @@ export function LeadReviewPage() {
 
         <aside className="panel composer-panel">
           <div className="panel-header compact"><div><h2>Outreach draft</h2><p>Human approval required before Gmail</p></div></div>
+          {draftStale && (
+            <div className="stale-banner">
+              <AlertTriangle size={14} />
+              <div>
+                <strong>Draft may be stale</strong>
+                <p>Research has changed since this draft was generated. Regenerate to align the draft with current research, then re-review before approving.</p>
+              </div>
+            </div>
+          )}
           <Label>Subject</Label><div className="draft-field single">{item.subject || "No draft subject yet"}</div>
           <Label>Message</Label><div className="draft-field message">{item.draft || "No outreach draft has been generated for this lead."}</div>
           <div className="guardrail"><span className="health-dot"/><div><strong>No automatic send</strong><p>Approval creates a Gmail draft only. Sending remains manual.</p></div></div>
           <div className="section-rule"/>
+          {draftStale && (
+            <>
+              <Label>Draft freshness</Label>
+              <button
+                className="button secondary full"
+                disabled={regenerateDisabled}
+                onClick={() => regenerate.mutate()}
+                title="Regenerate the outreach draft from current research. Clears the stale flag."
+              >
+                <RotateCcw size={13} />
+                {regenerate.isPending ? "Regenerating…" : "Regenerate draft"}
+              </button>
+              {regenerate.data && <p className="preview-foot">Draft regenerated from current research. Review before approving.</p>}
+              {regenerate.error && <div className="error-banner compact">{(regenerate.error as Error).message}</div>}
+              <div className="section-rule"/>
+            </>
+          )}
           <Label>Review action</Label>
           {mutate.error && <div className="error-banner compact">{(mutate.error as Error).message}</div>}
           <div className="review-actions">

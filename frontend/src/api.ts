@@ -6,6 +6,7 @@ import type {
   LeadList,
   Meta,
   RefreshResult,
+  RegenerateResult,
   RunList,
   RunRow
 } from "./types";
@@ -66,6 +67,8 @@ export const api = {
     request<Lead>(`/api/leads/${id}/${action}`, { method: "POST" }),
   refreshResearch: (id: number) =>
     request<RefreshResult>(`/api/leads/${id}/refresh-research`, { method: "POST" }),
+  regenerateDraft: (id: number) =>
+    request<RegenerateResult>(`/api/leads/${id}/regenerate-draft`, { method: "POST" }),
   runDiscovery: (limit = 20) =>
     request<RunRow>(`/api/runs/discovery?limit=${limit}`, { method: "POST" }),
   runProcess: (limit = 10) =>

@@ -137,6 +137,7 @@ CREATE TABLE IF NOT EXISTS leads (
     draft TEXT,
     status TEXT NOT NULL DEFAULT 'discovered',
     gmail_draft_id TEXT,
+    draft_stale INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_contact_at TEXT,
@@ -174,6 +175,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 # Columns to add if they don't exist (backward-compatible migration).
 _MIGRATION_COLUMNS = [
     ("contact_quality", "TEXT"),
+    ("draft_stale", "INTEGER DEFAULT 0"),
 ]
 
 # Columns to add to the ``runs`` table if missing in older database files.

@@ -42,7 +42,7 @@ from .db import (
 )
 from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
 from .gmail_client import create_draft
-from .pipeline import discover_only, refresh_lead_research, run as run_pipeline
+from .pipeline import discover_only, refresh_lead_research, regenerate_draft, run as run_pipeline
 
 logger = get_logger("api")
 
@@ -128,6 +128,8 @@ def _serialize_lead(row: Any) -> dict:
     data = dict(row)
     data["services_list"] = _parse_list(data.get("services"))
     data["score_reason_list"] = _parse_list(data.get("score_reasons"))
+    # draft_stale is stored as INTEGER (0/1); expose as boolean for the API.
+    data["draft_stale"] = bool(data.get("draft_stale", 0))
     return data
 
 
@@ -137,6 +139,7 @@ def _demo_lead(lead_id: int) -> dict:
             data = dict(lead)
             data["services_list"] = _parse_list(data.get("services"))
             data["score_reason_list"] = _parse_list(data.get("score_reasons"))
+            data["draft_stale"] = bool(data.get("draft_stale", 0))
             return data
     raise HTTPException(status_code=404, detail="Lead not found")
 
@@ -546,6 +549,11 @@ def refresh_research(lead_id: int) -> dict:
     Protected workflow state (status, draft, gmail_draft_id, follow-up dates)
     is never modified.  Contact fields are updated only when the refresh
     discovers a better contact than the one currently stored.
+
+    When a draft already exists and any draft-driving research field has
+    changed, the draft is marked stale (``draft_stale=1``).  The draft body
+    is never modified by refresh — the operator must explicitly regenerate
+    via ``POST /api/leads/{id}/regenerate-draft``.
     """
     _require_live_mode()
     lead = _live_lead(lead_id)
@@ -554,10 +562,41 @@ def refresh_research(lead_id: int) -> dict:
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=f"Research refresh failed: {type(exc).__name__}: {exc}",
+            detail=f"Research refresh failed: {type(exc).__name__}",
         ) from exc
     refreshed = _live_lead(lead_id)
     return {"refresh": result, "lead": refreshed}
+
+
+@app.post("/api/leads/{lead_id}/regenerate-draft")
+def regenerate_draft_endpoint(lead_id: int) -> dict:
+    """Explicitly regenerate the outreach draft from current research.
+
+    This is a human-triggered action.  It re-composes the outreach
+    subject/body from the lead's current research fields and clears the
+    stale flag.  Workflow status, gmail_draft_id, contact fields, and
+    follow-up dates are never modified.
+
+    The lead must already have research (proof_project, fit_reason,
+    outreach_angle) — i.e. it must have been qualified at some point.  A
+    lead with no research returns 409.
+    """
+    _require_live_mode()
+    lead = _live_lead(lead_id)
+    if not lead.get("proof_project") and not lead.get("fit_reason") and not lead.get("outreach_angle"):
+        raise HTTPException(
+            status_code=409,
+            detail="Lead has no research to regenerate a draft from",
+        )
+    try:
+        result = regenerate_draft(lead_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Draft regeneration failed: {type(exc).__name__}",
+        ) from exc
+    refreshed = _live_lead(lead_id)
+    return {"regenerate": result, "lead": refreshed}
 
 
 @app.post("/api/runs/discovery")

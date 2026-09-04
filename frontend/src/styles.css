@@ -156,6 +156,10 @@ select { height:34px; border:1px solid var(--line); border-radius:8px; padding:0
 .loading-line { color:var(--muted); font-size:10px; padding:12px 0; }
 .error-banner { border:1px solid #efd9de; background:#fff5f7; color:var(--rose); padding:10px 12px; border-radius:8px; font-size:10px; margin-bottom:14px; }
 .error-banner.compact { margin:0 0 9px; }
+.stale-banner { border:1px solid #f5e4c3; background:#fffbeb; color:#92600a; padding:10px 12px; border-radius:8px; margin-bottom:14px; display:flex; gap:9px; align-items:flex-start; }
+.stale-banner strong { display:block; font-size:10px; }
+.stale-banner p { margin:3px 0 0; font-size:9px; line-height:14px; }
+.stale-note { color:#92600a; font-weight:600; }
 .full-page-message { min-height:calc(100vh - 1px); display:grid; place-content:center; gap:8px; text-align:center; color:var(--muted); font-size:11px; }
 .full-page-message strong { color:var(--ink); font-size:18px; }
 .full-page-message.error { color:var(--rose); }
