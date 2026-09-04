@@ -882,7 +882,9 @@ def refresh_lead_research(lead_id: int) -> dict:
 
 
 class RegenerationBlocked(Exception):
-    """Raised when regeneration is not permitted for the current lead state.
+    """Raised when regeneration is not permitted for the current lead state,
+    or when a concurrent modification caused the optimistic-concurrency
+    conditional update to fail (R2-1/R2-2).
 
     The message is safe to surface to the API caller (no secrets).
     """
@@ -982,22 +984,47 @@ def regenerate_draft(lead_id: int) -> dict:
 
     logger.info("Regenerating outreach draft for lead id=%s domain=%s", lead_id, domain)
 
+    # R2-1: Take a snapshot of the state that must NOT change during the
+    # (potentially slow) draft_outreach() / OpenAI call.  The conditional
+    # UPDATE after the call will fail if any of these fields changed,
+    # preventing TOCTOU races.
+    snapshot_status = status
+    snapshot_draft = draft_body
+    snapshot_company = company
+    snapshot_fit_reason = fit_reason
+    snapshot_proof_project = proof_project
+    snapshot_outreach_angle = outreach_angle
+
     # R1-11: Only draft_outreach() is called.  No Gmail, Serper, or
     # analyze_agency calls.
     subject, body = draft_outreach(company, fit_reason, proof_project, outreach_angle)
 
-    # R1-6 / R1-7: Regeneration always returns the lead to 'drafted' and
-    # clears stale.  Approved leads lose approval (the new content was never
-    # reviewed).  R1-11: Only subject, draft, draft_stale, status are
-    # modified — gmail_draft_id, contact fields, follow-up dates, and
-    # research fields are untouched.
-    update_lead(
+    # R2-1: Optimistic-concurrency conditional UPDATE.  The write succeeds
+    # ONLY if the lead's relevant state still matches the snapshot.  If a
+    # concurrent workflow action (do-not-contact, Gmail draft, etc.) or a
+    # research refresh changed any draft-driving field, the update affects
+    # zero rows and we return a controlled 409 conflict.
+    from .db import replace_stale_draft_if_current
+    updated = replace_stale_draft_if_current(
         lead_id,
+        expected_status=snapshot_status,
+        expected_draft=snapshot_draft,
+        expected_company=snapshot_company,
+        expected_fit_reason=snapshot_fit_reason,
+        expected_proof_project=snapshot_proof_project,
+        expected_outreach_angle=snapshot_outreach_angle,
         subject=subject,
         draft=body,
-        draft_stale=0,
-        status="drafted",
     )
+
+    # R2-2: If the conditional update failed, do NOT overwrite newer state.
+    # The generated draft is discarded — correctness over reusing stale output.
+    if not updated:
+        raise RegenerationBlocked(
+            "Lead changed while the draft was being regenerated. "
+            "Review the latest lead state and try again."
+        )
+
     logger.info("Regenerated outreach draft for lead id=%s domain=%s", lead_id, domain)
 
     return {

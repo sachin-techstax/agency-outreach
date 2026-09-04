@@ -2577,3 +2577,294 @@ def test_api_regenerate_stale_approved_revokes_to_drafted(tmp_path, monkeypatch)
     assert body["lead"]["status"] == "drafted"
     assert body["lead"]["draft_stale"] is False
     assert body["lead"]["subject"] == "Fresh subject"
+
+
+# ---------------------------------------------------------------------------
+# R2 optimistic concurrency hardening
+# ---------------------------------------------------------------------------
+
+def _make_concurrent_draft_outreach(monkeypatch, mutate_during_call):
+    """Create a draft_outreach mock that mutates the DB mid-call.
+
+    ``mutate_during_call`` receives the lead_id and performs arbitrary DB
+    mutations BEFORE the mock returns its generated subject/body.
+    """
+    def fake_draft(company, fit_reason, proof_project, outreach_angle):
+        # The lead_id is not passed to draft_outreach; capture it via closure.
+        mutate_during_call()
+        return ("Concurrent subject", "Concurrent draft body")
+
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", fake_draft)
+    return fake_draft
+
+
+def test_concurrent_do_not_contact_prevents_regeneration_write(tmp_path, monkeypatch):
+    """R2-3: If status changes to do_not_contact during draft_outreach(),
+    the regeneration must NOT overwrite it.  Returns 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted"))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, status="do_not_contact")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked) as exc_info:
+        pipeline_mod.regenerate_draft(lead_id)
+    assert exc_info.value.status_code == 409
+    assert "changed while" in str(exc_info.value).lower()
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    # do_not_contact decision preserved.
+    assert row["status"] == "do_not_contact"
+    # Old draft preserved, NOT replaced by concurrent output.
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    # draft_stale remains true (not cleared by failed regeneration).
+    assert bool(row["draft_stale"]) is True
+
+
+def test_concurrent_research_change_prevents_regeneration_write(tmp_path, monkeypatch):
+    """R2-4: If draft-driving research changes during draft_outreach(),
+    the regeneration must NOT write a stale draft marked fresh.  Returns 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(
+        status="drafted",
+        proof_project="Aegis",
+        outreach_angle="old angle",
+    ))
+
+    from app.db import update_lead
+
+    def mutate():
+        # Research refresh changes draft-driving fields.
+        update_lead(
+            lead_id,
+            proof_project="Forge Crew",
+            outreach_angle="new angle",
+        )
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked):
+        pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    # New research preserved.
+    assert row["proof_project"] == "Forge Crew"
+    assert row["outreach_angle"] == "new angle"
+    # Old draft NOT replaced.
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    # Still stale.
+    assert bool(row["draft_stale"]) is True
+
+
+def test_concurrent_gmail_draft_prevents_regeneration_write(tmp_path, monkeypatch):
+    """R2-5: If a Gmail draft is created during draft_outreach(), the
+    regeneration must NOT overwrite status/gmail_draft_id/draft.  Returns 409."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved"))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, gmail_draft_id="gmail-123", status="gmail_drafted")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked):
+        pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "gmail_drafted"
+    assert row["gmail_draft_id"] == "gmail-123"
+    assert row["subject"] == "Old subject"
+    assert row["draft"] == "Old draft body"
+    assert bool(row["draft_stale"]) is True
+
+
+def test_concurrent_contact_change_does_not_block_regeneration(tmp_path, monkeypatch):
+    """R2: Contact-only concurrent change does NOT block regeneration because
+    contact fields are not in the optimistic-concurrency snapshot."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted"))
+
+    from app.db import update_lead
+
+    def mutate():
+        # Contact change — NOT a draft-driving field.
+        update_lead(lead_id, contact_email="new-email@co.example", contact_quality="high")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+    assert row["subject"] == "Concurrent subject"
+    assert row["draft"] == "Concurrent draft body"
+    # Contact was updated by the concurrent mutation and preserved.
+    assert row["contact_email"] == "new-email@co.example"
+
+
+def test_concurrent_score_change_does_not_block_regeneration(tmp_path, monkeypatch):
+    """R2: Score-only concurrent change does NOT block regeneration because
+    score is not a draft-driving field."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted", score=80))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, score=95)
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+    assert row["score"] == 95  # concurrent score change preserved
+
+
+def test_concurrent_reject_status_change_prevents_regeneration(tmp_path, monkeypatch):
+    """R2: If status changes from drafted to rejected during draft_outreach(),
+    the regeneration must fail because the snapshot status no longer matches."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted"))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, status="rejected")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    from app.pipeline import RegenerationBlocked
+    with pytest.raises(RegenerationBlocked):
+        pipeline_mod.regenerate_draft(lead_id)
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "rejected"
+    assert row["subject"] == "Old subject"
+    assert bool(row["draft_stale"]) is True
+
+
+def test_optimistic_conflict_returns_409_via_api(tmp_path, monkeypatch):
+    """R2-2: The API endpoint returns 409 on optimistic concurrency conflict."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted"))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, status="do_not_contact")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+    assert "changed while" in resp.json()["detail"].lower()
+
+
+def test_generated_stale_result_discarded_after_conflict(tmp_path, monkeypatch):
+    """R2-2: The generated draft from a conflicted regeneration is discarded —
+    it must NOT be stored anywhere."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted", subject="Original", draft="Original body"))
+
+    from app.db import update_lead
+
+    def mutate():
+        update_lead(lead_id, status="do_not_contact")
+
+    _make_concurrent_draft_outreach(monkeypatch, mutate)
+
+    client = TestClient(api_mod.app)
+    resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
+    assert resp.status_code == 409
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    # Original draft preserved, concurrent output discarded.
+    assert row["subject"] == "Original"
+    assert row["draft"] == "Original body"
+    assert "Concurrent" not in row["subject"]
+    assert "Concurrent" not in row["draft"]
+
+
+def test_normal_drafted_regeneration_succeeds_with_optimistic_update(tmp_path, monkeypatch):
+    """R2-6: Normal drafted regeneration (no concurrent change) succeeds."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="drafted"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+    assert result["status"] == "drafted"
+    assert result["draft_stale"] is False
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+    assert row["subject"] == "Fresh subject"
+    assert row["draft"] == "Fresh body"
+
+
+def test_rejected_regeneration_succeeds_with_optimistic_update(tmp_path, monkeypatch):
+    """R2-6: Rejected regeneration (no concurrent change) succeeds -> drafted."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="rejected"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False
+
+
+def test_approved_regeneration_succeeds_with_optimistic_update(tmp_path, monkeypatch):
+    """R2-6: Approved regeneration (no concurrent change) succeeds -> drafted."""
+    _live_mode(tmp_path)
+    init_db()
+    lead_id = upsert_lead(_stale_lead(status="approved"))
+    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+
+    result = pipeline_mod.regenerate_draft(lead_id)
+    assert result["regenerated"] is True
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert row["status"] == "drafted"
+    assert bool(row["draft_stale"]) is False

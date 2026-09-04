@@ -50,9 +50,13 @@ export function LeadReviewPage() {
 
   const item = lead.data;
   const demoMode = Boolean(meta.data?.demo_mode);
-  const disabled = demoMode || mutate.isPending;
-  const refreshDisabled = demoMode || refresh.isPending;
-  const regenerateDisabled = demoMode || regenerate.isPending;
+  // R2-7: Shared busy state — while any workflow mutation is in flight,
+  // disable all conflicting mutations to reduce accidental races.
+  // The backend remains authoritative (optimistic concurrency).
+  const workflowBusy = mutate.isPending || refresh.isPending || regenerate.isPending;
+  const disabled = demoMode || workflowBusy;
+  const refreshDisabled = demoMode || workflowBusy;
+  const regenerateDisabled = demoMode || workflowBusy;
   const primary = primaryAction(item.status);
   const draftStale = Boolean(item.draft_stale);
 
@@ -138,7 +142,7 @@ export function LeadReviewPage() {
               <AlertTriangle size={14} />
               <div>
                 <strong>Draft may be stale</strong>
-                <p>Research has changed since this draft was generated. Regenerate to align the draft with current research, then re-review before approving.</p>
+                <p>This draft may not match the current research. Regenerate it before approval.</p>
               </div>
             </div>
           )}

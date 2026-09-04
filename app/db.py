@@ -361,6 +361,89 @@ def get_lead(lead_id: int):
         return db.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
 
 
+def replace_stale_draft_if_current(
+    lead_id: int,
+    *,
+    expected_status: str,
+    expected_draft: str,
+    expected_company: str,
+    expected_fit_reason: str,
+    expected_proof_project: str,
+    expected_outreach_angle: str,
+    subject: str,
+    draft: str,
+) -> bool:
+    """R2-1: Optimistic-concurrency conditional update for draft regeneration.
+
+    Atomically replaces the stale draft ONLY if the lead's relevant state
+    still matches the snapshot taken before the (slow) ``draft_outreach()``
+    call.  This prevents TOCTOU races where a human workflow action or a
+    research refresh modifies the lead during the LLM call.
+
+    The UPDATE succeeds only when ALL of the following still hold:
+      - ``id`` matches
+      - ``status`` matches (drafted/rejected/approved — not mutated to
+        do_not_contact/gmail_drafted/sent by a concurrent action)
+      - ``draft_stale`` is still 1 (not cleared by a concurrent regeneration)
+      - ``gmail_draft_id`` is still empty (no concurrent Gmail draft)
+      - ``draft`` body is unchanged (no concurrent regeneration wrote a new one)
+      - ``company``, ``fit_reason``, ``proof_project``, ``outreach_angle``
+        are unchanged (no concurrent research refresh changed draft-driving
+        fields)
+
+    Contact fields, score, summary, and services are intentionally NOT
+    checked because they do not affect the generated draft.
+
+    Returns ``True`` if exactly one row was updated, ``False`` on conflict.
+    """
+    init_db()
+    timestamp = now_iso()
+    with conn() as db:
+        cur = db.execute(
+            """
+            UPDATE leads
+            SET subject = ?,
+                draft = ?,
+                draft_stale = 0,
+                status = 'drafted',
+                updated_at = ?
+            WHERE id = ?
+              AND status = ?
+              AND draft_stale = 1
+              AND COALESCE(gmail_draft_id, '') = ''
+              AND COALESCE(draft, '') = ?
+              AND COALESCE(company, '') = ?
+              AND COALESCE(fit_reason, '') = ?
+              AND COALESCE(proof_project, '') = ?
+              AND COALESCE(outreach_angle, '') = ?
+            """,
+            (
+                subject,
+                draft,
+                timestamp,
+                lead_id,
+                expected_status,
+                expected_draft,
+                expected_company,
+                expected_fit_reason,
+                expected_proof_project,
+                expected_outreach_angle,
+            ),
+        )
+        updated = cur.rowcount == 1
+    if updated:
+        logger.debug(
+            "Optimistic draft replacement succeeded for lead id=%s", lead_id
+        )
+    else:
+        logger.info(
+            "Optimistic draft replacement conflicted for lead id=%s "
+            "(lead changed during regeneration)",
+            lead_id,
+        )
+    return updated
+
+
 def get_lead_by_domain(domain: str):
     """Return the existing lead row for *domain*, or None."""
     init_db()
