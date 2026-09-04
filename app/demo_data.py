@@ -116,4 +116,5 @@ def demo_dashboard() -> dict:
         "due_followups": 5,
         "review_queue": DEMO_LEADS[:6],
         "latest_run": DEMO_LATEST_RUN,
+        "latest_run_row": None,
     }

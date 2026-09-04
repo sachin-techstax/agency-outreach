@@ -4,18 +4,17 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api";
 import { Shell } from "./components/Shell";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DiscoveryPage } from "./pages/DiscoveryPage";
+import { FollowupsPage } from "./pages/FollowupsPage";
 import { LeadReviewPage } from "./pages/LeadReviewPage";
 import { LeadsPage } from "./pages/LeadsPage";
+import { RunsPage } from "./pages/RunsPage";
 
 const client = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 15_000, retry: 1, refetchOnWindowFocus: false }
   }
 });
-
-function Placeholder({ title }: { title: string }) {
-  return <div className="full-page-message"><strong>{title}</strong><span>This PactSignal workspace is next in the operator UI milestone.</span></div>;
-}
 
 function TokenScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
   const [token, setToken] = useState("");
@@ -114,9 +113,9 @@ export default function App() {
               <Route path="/" element={<DashboardPage />} />
               <Route path="/leads" element={<LeadsPage />} />
               <Route path="/leads/:id" element={<LeadReviewPage />} />
-              <Route path="/discovery" element={<Placeholder title="Discovery" />} />
-              <Route path="/runs" element={<Placeholder title="Outreach runs" />} />
-              <Route path="/follow-ups" element={<Placeholder title="Follow-ups" />} />
+              <Route path="/discovery" element={<DiscoveryPage />} />
+              <Route path="/runs" element={<RunsPage />} />
+              <Route path="/follow-ups" element={<FollowupsPage />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>
           </Routes>

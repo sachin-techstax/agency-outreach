@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Callable
 from urllib.parse import urlparse
 
 from .candidate_filter import evaluate_candidate, normalize_domain
@@ -31,6 +32,9 @@ logger = get_logger("pipeline")
 qual_logger = get_logger("qualification")
 discovery_logger = get_logger("discovery")
 
+# Optional progress callback signature: receives a dict snapshot.
+ProgressCallback = Callable[[dict], None]
+
 
 def _classify_failure(exc: Exception) -> str:
     """Return a short human-readable failure category for an exception."""
@@ -51,7 +55,10 @@ def _classify_failure(exc: Exception) -> str:
     return name
 
 
-def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
+def _discover_candidates(
+    target: int,
+    progress_cb: ProgressCallback | None = None,
+) -> tuple[dict, dict, dict]:
     """Run discovery searches, filter candidates, and return eligible domains.
 
     Returns a tuple of ``(candidates, priorities, discovery_stats)`` where:
@@ -178,6 +185,13 @@ def _discover_candidates(target: int) -> tuple[dict, dict, dict]:
             query_accepted,
             query_rejected,
         )
+        if progress_cb is not None:
+            progress_cb({
+                "stage": "discovery",
+                "queries_completed": search_attempts,
+                "raw_domains": len(raw_domains),
+                "eligible_domains": len(best_hit),
+            })
 
     # --- rank the eligible pool deterministically ---
     ranked = sorted(
@@ -281,7 +295,10 @@ def _is_better_hit(
     return new_hit.result_rank < old_hit.result_rank
 
 
-def discover_only(limit: int | None = None) -> dict:
+def discover_only(
+    limit: int | None = None,
+    progress_cb: ProgressCallback | None = None,
+) -> dict:
     """Run discovery only (Serper + filter + dedupe + priority ranking).
 
     Read-only with respect to leads: no crawl, no OpenAI, no contact
@@ -300,7 +317,7 @@ def discover_only(limit: int | None = None) -> dict:
     """
     target = limit or settings.discovery_limit
     logger.info("Starting discovery-only run. Pool target: %d", target)
-    candidates, priorities, stats = _discover_candidates(target)
+    candidates, priorities, stats = _discover_candidates(target, progress_cb)
 
     full_pool_size = len(candidates)
     display_n = min(target, full_pool_size)
@@ -334,12 +351,15 @@ def discover_only(limit: int | None = None) -> dict:
     }
 
 
-def run(limit: int | None = None) -> dict:
+def run(
+    limit: int | None = None,
+    progress_cb: ProgressCallback | None = None,
+) -> dict:
     target = limit or settings.discovery_limit
     batch_start = time.perf_counter()
     logger.info("Starting agency discovery. Target: %d", target)
 
-    candidates, priorities, discovery_stats = _discover_candidates(target)
+    candidates, priorities, discovery_stats = _discover_candidates(target, progress_cb)
 
     # --- suppress existing handled leads AFTER ranking, BEFORE crawl ---
     # This is DB-aware suppression: domains that already have a lead in a
@@ -370,6 +390,15 @@ def run(limit: int | None = None) -> dict:
             "No fresh/retryable candidates remain after existing-lead "
             "suppression."
         )
+    if progress_cb is not None:
+        progress_cb({
+            "stage": "suppression",
+            "raw_candidate_domains": discovery_stats["raw_candidate_domains"],
+            "candidate_domains": discovery_stats["candidate_domains"],
+            "fresh_retryable_pool": fresh_pool_size,
+            "suppressed_existing": len(suppressed),
+            "target": min(target, fresh_pool_size),
+        })
 
     attempted = 0
     processed = 0
@@ -389,6 +418,23 @@ def run(limit: int | None = None) -> dict:
     protected_existing = 0          # existing leads found in protected state
     protected_outreach_skipped = 0  # protected leads where outreach was skipped
 
+    def _emit_progress(current_domain: str | None) -> None:
+        if progress_cb is None:
+            return
+        progress_cb({
+            "stage": "processing",
+            "attempted": attempted,
+            "target": min(target, fresh_pool_size),
+            "current_domain": current_domain or "",
+            "processed": processed,
+            "qualified": qualified,
+            "drafted": drafted,
+            "below_score": below_score,
+            "no_contact": no_contact,
+            "skipped": skipped,
+            "failed": failed,
+        })
+
     for domain, hit in candidates.items():
         if attempted >= target:
             break
@@ -401,6 +447,7 @@ def run(limit: int | None = None) -> dict:
             )
         else:
             logger.info("Processing agency %d/%d: %s", attempted, target, domain)
+        _emit_progress(domain)
         site_start = time.perf_counter()
         try:
             site = crawl_company(hit.url)
@@ -479,7 +526,12 @@ def run(limit: int | None = None) -> dict:
 
             # --- qualified: run LLM analysis + contact discovery + outreach ---
             qualified += 1
-            contact = discover_contact(site["text"], site["pages"], site["domain"])
+            contact = discover_contact(
+                site["text"], site["pages"], site["domain"],
+                site.get("mailtos", []),
+                home_text=site.get("home_text"),
+                home_url=site.get("root"),
+            )
             if not contact.get("contact_email"):
                 no_contact += 1
                 logger.info("No contact email for %s; drafting anyway", domain)
@@ -526,6 +578,7 @@ def run(limit: int | None = None) -> dict:
         finally:
             elapsed = time.perf_counter() - site_start
             logger.info("Finished %s in %.1fs", domain, elapsed)
+            _emit_progress(None)
 
     batch_elapsed = time.perf_counter() - batch_start
     summary = {
@@ -627,3 +680,132 @@ def _log_summary(summary: dict) -> None:
         for domain, reason in summary["failures"]:
             lines.append(f"- {domain}: {reason}")
     print("\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Per-lead research refresh (protected-state safe)
+# ---------------------------------------------------------------------------
+
+# Fields that represent human workflow decisions and must NEVER be touched by
+# an automated research refresh, regardless of lead status.  This is a stricter
+# invariant than the upsert_lead protection: refresh never regenerates outreach
+# content or moves workflow state, even for non-protected leads.
+_REFRESH_PROTECTED_FIELDS = frozenset({
+    "status",
+    "subject",
+    "draft",
+    "gmail_draft_id",
+    "last_contact_at",
+    "followup_due_at",
+})
+
+
+def refresh_lead_research(lead_id: int) -> dict:
+    """Re-crawl and re-research an existing lead without changing workflow state.
+
+    Re-runs deterministic commercial-fit scoring, contact discovery and LLM
+    agency analysis against the lead's current website, then persists the
+    refreshed research metadata (score, summary, services, fit_reason,
+    proof_project, outreach_angle) and contact fields via explicit
+    :func:`update_lead` calls.
+
+    Safety invariants:
+    - Workflow status is NEVER changed.
+    - Existing outreach ``subject``/``draft`` and ``gmail_draft_id`` are NEVER
+      overwritten, even for non-protected leads.  Refresh does not regenerate
+      outreach content; that is the pipeline's job for fresh/retryable leads.
+    - ``last_contact_at`` and ``followup_due_at`` are NEVER touched.
+    - Contact fields (email/source/quality/role/name) are updated only when
+      the newly discovered contact is an improvement: a non-empty email that
+      is either missing today or strictly higher quality than the existing
+      one.  This lets a refresh recover a missed contact (e.g. LaunchPad Lab)
+      without downgrading an already-good contact.
+
+    Returns a summary dict describing what was refreshed.
+    """
+    from .db import get_lead as _get_lead
+    existing = _get_lead(lead_id)
+    if not existing:
+        raise ValueError(f"Lead {lead_id} not found")
+
+    domain = existing["domain"]
+    website = existing["website"] or f"https://{domain}"
+    logger.info("Refreshing research for lead id=%s domain=%s", lead_id, domain)
+
+    site = crawl_company(website)
+    if len(site["text"]) < 200:
+        logger.warning("Refresh: insufficient content for %s (%d chars)", domain, len(site["text"]))
+        return {
+            "lead_id": lead_id,
+            "domain": domain,
+            "refreshed": False,
+            "reason": "insufficient content",
+        }
+
+    company = extract_company_name(site["title"] or existing["company"], domain)
+    fit = score_commercial_fit(site["text"])
+    qual_logger.info(
+        "%s refresh commercial category=%s score=%d",
+        domain, fit.category, fit.score,
+    )
+
+    contact = discover_contact(
+        site["text"], site["pages"], site["domain"], site.get("mailtos", []),
+        home_text=site.get("home_text"),
+        home_url=site.get("root"),
+    )
+
+    analysis = analyze_agency(company, site["root"], site["text"])
+
+    # Research metadata is always safe to refresh.
+    updates = {
+        "company": company,
+        "website": site["root"],
+        "score": fit.score,
+        "score_reasons": json.dumps(fit.reasons),
+        "summary": analysis.get("summary", ""),
+        "services": analysis.get("services", ""),
+        "fit_reason": analysis.get("fit_reason", ""),
+        "proof_project": analysis.get("proof_project", existing["proof_project"] or "WingerX"),
+        "outreach_angle": analysis.get("outreach_angle", ""),
+    }
+
+    # Contact fields: only update when the new contact is an improvement.
+    new_email = contact.get("contact_email", "")
+    new_quality = contact.get("contact_quality", "none")
+    old_email = existing["contact_email"] or ""
+    old_quality = existing["contact_quality"] or "none"
+    quality_rank = {"high": 3, "medium": 2, "low": 1, "none": 0}
+    contact_improved = bool(new_email) and (
+        not old_email or quality_rank.get(new_quality, 0) > quality_rank.get(old_quality, 0)
+    )
+    contact_refreshed = False
+    if contact_improved:
+        updates["contact_email"] = new_email
+        updates["contact_source"] = contact.get("contact_source", "")
+        updates["contact_name"] = contact.get("contact_name", "")
+        updates["contact_role"] = contact.get("contact_role", "")
+        updates["contact_quality"] = new_quality
+        contact_refreshed = True
+        logger.info(
+            "Refresh found improved contact for %s: %s (was %s)",
+            domain, new_email, old_email or "(none)",
+        )
+
+    # Defensive: never allow refresh to touch protected workflow fields even
+    # if a caller accidentally included them.
+    updates = {k: v for k, v in updates.items() if k not in _REFRESH_PROTECTED_FIELDS}
+
+    update_lead(lead_id, **updates)
+    logger.info("Refreshed research for lead id=%s domain=%s", lead_id, domain)
+
+    return {
+        "lead_id": lead_id,
+        "domain": domain,
+        "refreshed": True,
+        "score": fit.score,
+        "contact_refreshed": contact_refreshed,
+        "contact_email": new_email if contact_refreshed else old_email,
+        "contact_source": contact.get("contact_source", "") if contact_refreshed else existing["contact_source"],
+        "contact_quality": new_quality if contact_refreshed else old_quality,
+    }

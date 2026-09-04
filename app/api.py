@@ -5,27 +5,46 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from typing import Literal
 from fastapi.staticfiles import StaticFiles
 
 from .auth import validate_auth_config, valid_api_token
 from .config import settings
+from .logging_config import get_logger
 from .db import (
+    RUN_COMPLETED,
+    RUN_FAILED,
+    RUN_QUEUED,
+    RUN_RUNNING,
+    RUN_TYPE_DISCOVERY,
+    RUN_TYPE_PROCESSING,
     SUPPRESSED_STATUSES,
+    create_run,
     due_followups,
     get_lead,
+    get_run,
     init_db,
     list_leads,
+    list_runs,
+    list_runs_by_type,
+    list_runs_by_type_and_status,
+    list_runs_by_status,
     now_iso,
+    reconcile_abandoned_runs,
+    set_run_progress,
     update_lead,
+    update_run,
 )
 from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
 from .gmail_client import create_draft
-from .pipeline import discover_only, run as run_pipeline
+from .pipeline import discover_only, refresh_lead_research, run as run_pipeline
+
+logger = get_logger("api")
 
 app = FastAPI(
     title="PactSignal Operator API",
@@ -44,6 +63,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Single global lock guarding any pipeline/discovery execution.  Held for the
+# entire lifetime of a background run so concurrent run requests return 409.
 _RUN_LOCK = threading.Lock()
 _LATEST_RUN: dict[str, Any] | None = None
 
@@ -51,8 +72,19 @@ _PUBLIC_API_PATHS = {"/api/health"}
 
 
 @app.on_event("startup")
-def _validate_auth_startup() -> None:
+def _startup_reconcile() -> None:
+    """Validate auth config and reconcile abandoned runs from a previous
+    process (R1-6).  Because background runs execute in daemon threads inside
+    this process, any persisted ``queued`` or ``running`` row found during a
+    fresh startup cannot still have a live worker and is marked ``failed``.
+    """
     validate_auth_config()
+    try:
+        reconciled = reconcile_abandoned_runs()
+        if reconciled:
+            logger.info("Reconciled %d abandoned run(s) on startup", reconciled)
+    except Exception as exc:
+        logger.warning("Run reconciliation failed on startup: %s", exc)
 
 
 @app.middleware("http")
@@ -134,6 +166,191 @@ def _run_exclusive(fn):
         _RUN_LOCK.release()
 
 
+def _sanitize_error_summary(exc: Exception) -> str:
+    """Build a bounded, sanitized failure classification for persistence.
+
+    R2-4: Raw exception messages can contain URLs, query parameters, headers,
+    credentials, tokens, or provider payload fragments.  We persist ONLY the
+    exception class name (and an HTTP status code when available from httpx),
+    never the raw ``str(exc)``.  Detailed tracebacks remain in server logs
+    via the logger; they must NOT be persisted in ``runs.error_summary`` or
+    returned in API responses.
+
+    Examples:
+      - ``ConnectTimeout`` → ``"Run failed: ConnectTimeout"``
+      - ``HTTPStatusError`` with 429 → ``"Run failed: HTTP 429"``
+      - ``RuntimeError`` → ``"Run failed: RuntimeError"``
+    """
+    exc_name = type(exc).__name__
+    # Extract HTTP status code from httpx HTTPStatusError if available.
+    status_code = getattr(getattr(exc, "response", None), "status_code", None)
+    if status_code is not None:
+        return f"Run failed: HTTP {status_code}"
+    return f"Run failed: {exc_name}"
+
+
+def _sanitize_result_for_storage(run_type: str, result: dict) -> dict:
+    """Build a sanitized result snapshot safe to persist in ``result_json``.
+
+    Strips any field that could carry secrets (tracebacks, raw exception
+    objects, credentials).  For discovery runs, preserves the ranked
+    candidate list and pool metrics so the Discovery page can rebuild from
+    the DB after a restart or after a later processing run overwrites
+    ``_LATEST_RUN``.  For processing runs, preserves the summary metrics.
+    """
+    if run_type == RUN_TYPE_DISCOVERY:
+        return {
+            "type": run_type,
+            "query_count": result.get("query_count"),
+            "search_results_total": result.get("search_results_total"),
+            "raw_candidate_domains": result.get("raw_candidate_domains"),
+            "rejected_candidate_domains": result.get("rejected_candidate_domains"),
+            "candidate_domains": result.get("candidate_domains"),
+            "ranked_candidate_domains": result.get("ranked_candidate_domains"),
+            "displayed_candidate_domains": result.get("displayed_candidate_domains"),
+            "candidate_priority_avg": result.get("candidate_priority_avg"),
+            "per_query": result.get("per_query"),
+            "ranked": result.get("ranked", []),
+        }
+    # Processing run: keep summary metrics only (no secrets, no tracebacks).
+    return {
+        "type": run_type,
+        "attempted": result.get("attempted"),
+        "processed": result.get("processed"),
+        "qualified": result.get("qualified"),
+        "drafted": result.get("drafted"),
+        "below_score": result.get("below_score"),
+        "no_contact": result.get("no_contact"),
+        "skipped": result.get("skipped"),
+        "failed": result.get("failed"),
+        "duration_s": result.get("duration_s"),
+    }
+
+
+def _serialize_run(row: Any) -> dict:
+    data = dict(row)
+    progress = data.get("progress")
+    if progress:
+        try:
+            data["progress"] = json.loads(progress)
+        except (json.JSONDecodeError, TypeError):
+            data["progress"] = None
+    else:
+        data["progress"] = None
+    result_json = data.get("result_json")
+    if result_json:
+        try:
+            data["result"] = json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            data["result"] = None
+    else:
+        data["result"] = None
+    return data
+
+
+def _start_background_run(
+    run_type: str,
+    limit: int,
+    executor: Callable[[int, Callable[[dict], None]], dict],
+) -> dict:
+    """Create a run row, claim the run lock, and execute in a background thread.
+
+    The lock is claimed synchronously so a concurrent run returns 409 before
+    any work starts.  The lock is held until the background worker finishes.
+
+    R1-7: lock ownership is exception-safe.  If anything fails after the
+    lock is acquired but before the background worker successfully owns
+    execution (create_run, update_run, or thread.start), the lock is
+    released and any already-created run row is marked failed.  Once the
+    worker starts, the worker owns the lock and releases it in its
+    ``finally``.
+
+    ``executor`` receives ``(limit, progress_cb)`` and returns the pipeline
+    summary dict.  The run row is transitioned queued -> running -> completed
+    or failed, with progress snapshots persisted along the way.  A sanitized
+    result snapshot is persisted in ``result_json`` so the Discovery page
+    and Dashboard can rebuild from the DB after a restart or after a later
+    run overwrites the in-memory ``_LATEST_RUN``.
+    """
+    if not _RUN_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="A PactSignal run is already in progress",
+        )
+    run_id: int | None = None
+    try:
+        run_id = create_run(run_type, requested_limit=limit)
+        update_run(run_id, status=RUN_RUNNING)
+        global _LATEST_RUN
+
+        def worker() -> None:
+            global _LATEST_RUN
+            try:
+                def progress_cb(snapshot: dict) -> None:
+                    set_run_progress(run_id, snapshot)
+
+                result = executor(limit, progress_cb)
+                sanitized = _sanitize_result_for_storage(run_type, result)
+                summary_fields = {
+                    "status": RUN_COMPLETED,
+                    "completed_at": now_iso(),
+                    "query_count": result.get("query_count"),
+                    "raw_candidate_domains": result.get("raw_candidate_domains"),
+                    "candidate_domains": result.get("candidate_domains"),
+                    "fresh_retryable_pool": result.get("fresh_retryable_pool"),
+                    "attempted": result.get("attempted"),
+                    "processed": result.get("processed"),
+                    "qualified": result.get("qualified"),
+                    "drafted": result.get("drafted"),
+                    "below_score": result.get("below_score"),
+                    "no_contact": result.get("no_contact"),
+                    "skipped": result.get("skipped"),
+                    "failed_count": result.get("failed"),
+                    "duration_s": result.get("duration_s"),
+                    "error_summary": None,
+                    "result_json": json.dumps(sanitized, separators=(",", ":")),
+                }
+                update_run(run_id, **summary_fields)
+                _LATEST_RUN = {"type": run_type, **result}
+            except Exception as exc:
+                # R2-4: persist only a sanitized classification — never the
+                # raw exception message, which could contain secrets.  The
+                # full traceback goes to server logs only.
+                error_summary = _sanitize_error_summary(exc)
+                logger.warning("Run %s failed: %s", run_id, type(exc).__name__)
+                update_run(
+                    run_id,
+                    status=RUN_FAILED,
+                    completed_at=now_iso(),
+                    error_summary=error_summary,
+                )
+                _LATEST_RUN = {
+                    "type": run_type,
+                    "error": error_summary,
+                }
+            finally:
+                _RUN_LOCK.release()
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+    except Exception:
+        # Pre-worker failure: release the lock and mark the run failed so a
+        # later run is not permanently locked out (R1-7).
+        _RUN_LOCK.release()
+        if run_id is not None:
+            try:
+                update_run(
+                    run_id,
+                    status=RUN_FAILED,
+                    completed_at=now_iso(),
+                    error_summary="Run failed to start",
+                )
+            except Exception:
+                pass
+        raise
+    return _serialize_run(get_run(run_id))
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {
@@ -180,12 +397,33 @@ def dashboard() -> dict:
 
     queue_statuses = {"drafted", "approved", "qualified", "discovered"}
     review_queue = [row for row in rows if row["status"] in queue_statuses][:6]
+
+    # R2-5: The persisted run row is AUTHORITATIVE for the Dashboard.  The
+    # in-memory ``_LATEST_RUN`` is NOT used to override persisted DB state —
+    # it may be stale or contradictory.  The Dashboard's ``latest_run`` payload
+    # is always rebuilt from the most recent persisted run row's ``result_json``
+    # so the UI reflects the DB, not process memory.  ``_LATEST_RUN`` remains
+    # only for internal/logging/CLI backward compatibility.
+    recent_runs = list_runs(limit=1)
+    latest_run_row = _serialize_run(recent_runs[0]) if recent_runs else None
+    latest_run = None
+    if latest_run_row and latest_run_row.get("result"):
+        latest_run = latest_run_row["result"]
+    elif latest_run_row and latest_run_row.get("status") == RUN_FAILED:
+        # A failed run has no result_json; surface a minimal payload so the
+        # UI can show the failure status.
+        latest_run = {
+            "type": latest_run_row["type"],
+            "error": latest_run_row.get("error_summary") or "Run failed",
+        }
+
     return {
         "mode": "private",
         "counts": counts,
         "due_followups": len(due_followups(now_iso())),
         "review_queue": review_queue,
-        "latest_run": _LATEST_RUN,
+        "latest_run": latest_run,
+        "latest_run_row": latest_run_row,
     }
 
 
@@ -301,30 +539,155 @@ def mark_sent(lead_id: int) -> dict:
     return _live_lead(lead_id)
 
 
+@app.post("/api/leads/{lead_id}/refresh-research")
+def refresh_research(lead_id: int) -> dict:
+    """Re-crawl and re-research an existing lead without changing workflow state.
+
+    Protected workflow state (status, draft, gmail_draft_id, follow-up dates)
+    is never modified.  Contact fields are updated only when the refresh
+    discovers a better contact than the one currently stored.
+    """
+    _require_live_mode()
+    lead = _live_lead(lead_id)
+    try:
+        result = refresh_lead_research(lead_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Research refresh failed: {type(exc).__name__}: {exc}",
+        ) from exc
+    refreshed = _live_lead(lead_id)
+    return {"refresh": result, "lead": refreshed}
+
+
 @app.post("/api/runs/discovery")
 def run_discovery(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    """Start a read-only discovery run in the background and return the run row.
+
+    Returns immediately with ``status`` set to ``running``.  Poll
+    ``GET /api/runs/{id}`` to observe progress and completion.  A concurrent
+    run request returns ``409``.
+    """
     _require_live_mode()
 
-    def execute():
-        global _LATEST_RUN
-        result = discover_only(limit)
-        _LATEST_RUN = {"type": "discovery", **result}
-        return _LATEST_RUN
+    def execute(lim: int, progress_cb):
+        return discover_only(lim, progress_cb=progress_cb)
 
-    return _run_exclusive(execute)
+    return _start_background_run(RUN_TYPE_DISCOVERY, limit, execute)
+
+
+@app.post("/api/runs/process")
+def run_process(limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    """Start a 'Process prospects' run (discovery + qualification + drafting).
+
+    This is the user-facing label for the outreach-processing pipeline.  It
+    does NOT send email.  Returns immediately with ``status`` set to
+    ``running``; poll ``GET /api/runs/{id}`` for progress.  A concurrent run
+    request returns ``409``.
+    """
+    _require_live_mode()
+
+    def execute(lim: int, progress_cb):
+        return run_pipeline(lim, progress_cb=progress_cb)
+
+    return _start_background_run(RUN_TYPE_PROCESSING, limit, execute)
 
 
 @app.post("/api/runs/outreach")
 def run_outreach(limit: int = Query(default=10, ge=1, le=50)) -> dict:
+    """Backward-compatible alias for ``POST /api/runs/process``.
+
+    The user-facing operator label is 'Process prospects'; this route is kept
+    so existing CLI/automation callers continue to work.  It runs the same
+    background processing pipeline and persists the run as type
+    ``processing``.
+    """
     _require_live_mode()
 
-    def execute():
-        global _LATEST_RUN
-        result = run_pipeline(limit)
-        _LATEST_RUN = {"type": "outreach", **result}
-        return _LATEST_RUN
+    def execute(lim: int, progress_cb):
+        return run_pipeline(lim, progress_cb=progress_cb)
 
-    return _run_exclusive(execute)
+    return _start_background_run(RUN_TYPE_PROCESSING, limit, execute)
+
+
+@app.get("/api/runs")
+def runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    type: Literal["discovery", "processing"] | None = Query(default=None),
+    status: Literal["queued", "running", "completed", "failed"] | None = Query(default=None),
+) -> dict:
+    """List recent persistent run rows (most recent first).
+
+    Optional ``type`` filter (``discovery`` or ``processing``) restricts the
+    list to a single run type.  Optional ``status`` filter (``queued``,
+    ``running``, ``completed``, ``failed``) restricts by run status.  Both
+    filters may be combined.  Invalid values for either parameter return a
+    clear ``422`` validation error (R3-2).
+
+    Used by the Discovery page to retrieve the most recent *completed*
+    discovery run (``?type=discovery&status=completed&limit=1``) so a later
+    failed attempt does not hide the last successful ranked result (R2-3).
+    """
+    if settings.pactsignal_demo_mode:
+        return {"items": [], "total": 0}
+    init_db()
+    if type and status:
+        rows = [_serialize_run(r) for r in list_runs_by_type_and_status(type, status, limit=limit)]
+    elif type:
+        rows = [_serialize_run(r) for r in list_runs_by_type(type, limit=limit)]
+    elif status:
+        rows = [_serialize_run(r) for r in list_runs_by_status(status, limit=limit)]
+    else:
+        rows = [_serialize_run(r) for r in list_runs(limit=limit)]
+    return {"items": rows, "total": len(rows)}
+
+
+@app.get("/api/runs/{run_id}")
+def run_detail(run_id: int) -> dict:
+    """Return a single persistent run row by id."""
+    if settings.pactsignal_demo_mode:
+        raise HTTPException(status_code=404, detail="Run not found")
+    init_db()
+    row = get_run(run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _serialize_run(row)
+
+
+@app.get("/api/followups")
+def followups() -> dict:
+    """List sent leads whose follow-up date is due."""
+    if settings.pactsignal_demo_mode:
+        # Surface the demo sent leads as due follow-ups for portfolio display.
+        items = [
+            {
+                "id": lead["id"],
+                "company": lead["company"],
+                "domain": lead["domain"],
+                "contact_email": lead.get("contact_email") or "",
+                "status": lead["status"],
+                "last_contact_at": lead.get("last_contact_at"),
+                "followup_due_at": lead.get("followup_due_at"),
+            }
+            for lead in DEMO_LEADS
+            if lead["status"] == "sent"
+        ]
+        return {"items": items, "total": len(items)}
+    init_db()
+    rows = due_followups(now_iso())
+    items = [
+        {
+            "id": row["id"],
+            "company": row["company"],
+            "domain": row["domain"],
+            "contact_email": row["contact_email"] or "",
+            "status": row["status"],
+            "last_contact_at": row["last_contact_at"],
+            "followup_due_at": row["followup_due_at"],
+        }
+        for row in rows
+    ]
+    return {"items": items, "total": len(items)}
 
 
 # Serve the compiled React app when it is present (Docker/web runtime). During

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
@@ -22,11 +22,22 @@ export function LeadReviewPage() {
     }
   });
 
+  const refresh = useMutation({
+    mutationFn: () => api.refreshResearch(id),
+    onSuccess: (value) => {
+      queryClient.setQueryData(["lead", id], value.lead);
+      queryClient.invalidateQueries({ queryKey: ["leads"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    }
+  });
+
   if (lead.isLoading) return <div className="full-page-message">Loading lead…</div>;
   if (lead.error || !lead.data) return <div className="full-page-message error">{(lead.error as Error)?.message ?? "Lead not found"}</div>;
 
   const item = lead.data;
-  const disabled = Boolean(meta.data?.demo_mode || mutate.isPending);
+  const demoMode = Boolean(meta.data?.demo_mode);
+  const disabled = demoMode || mutate.isPending;
+  const refreshDisabled = demoMode || refresh.isPending;
   const primary = primaryAction(item.status);
 
   return (
@@ -37,7 +48,11 @@ export function LeadReviewPage() {
           <h1>{item.company}</h1>
           <p>{item.domain}</p>
         </div>
-        <div className="header-actions"><Score value={item.score}/><StatusPill status={item.status}/><button className="button secondary" onClick={()=>navigate("/leads")}>Back to leads</button></div>
+        <div className="header-actions">
+          <Score value={item.score}/>
+          <StatusPill status={item.status}/>
+          <button className="button secondary" onClick={()=>navigate("/leads")}>Back to leads</button>
+        </div>
       </header>
 
       <section className="page-body review-workspace">
@@ -46,13 +61,28 @@ export function LeadReviewPage() {
           <Property label="Status"><StatusPill status={item.status}/></Property>
           <Property label="Commercial fit"><strong>{item.score} / 100</strong></Property>
           <Property label="Contact"><span>{item.contact_email || "—"}</span></Property>
+          <Property label="Contact source"><span className="truncate">{item.contact_source || "—"}</span></Property>
           <Property label="Contact quality"><span>{item.contact_quality || "—"}</span></Property>
+          <Property label="Contact role"><span>{item.contact_role || "—"}</span></Property>
           <Property label="Selected proof"><span>{item.proof_project || "—"}</span></Property>
           <Property label="Source query"><span>{item.source_query || "—"}</span></Property>
           <Property label="Last researched"><span>{fmtAge(item.updated_at)}</span></Property>
           <div className="section-rule"/>
           <h3>Activity</h3>
           <div className="timeline"><span>Research refreshed <small>{fmtAge(item.updated_at)}</small></span><span>Lead created <small>{fmtAge(item.created_at)}</small></span></div>
+          <div className="section-rule"/>
+          <Label>Research action</Label>
+          <button
+            className="button secondary full"
+            disabled={refreshDisabled}
+            onClick={() => refresh.mutate()}
+            title="Re-crawl and re-research this lead without changing workflow state or outreach drafts"
+          >
+            <RefreshCw size={13} />
+            {refresh.isPending ? "Refreshing…" : "Refresh contact & research"}
+          </button>
+          {refresh.data && <p className="preview-foot">{refresh.data.refresh.contact_refreshed ? `Contact updated: ${refresh.data.refresh.contact_email}` : refresh.data.refresh.refreshed ? "Research refreshed" : "Refresh failed"}</p>}
+          {refresh.error && <div className="error-banner compact">{(refresh.error as Error).message}</div>}
         </aside>
 
         <section className="panel intelligence-panel">
@@ -78,9 +108,9 @@ export function LeadReviewPage() {
             <button className="button danger-ghost" disabled={disabled || item.status==="sent"} onClick={()=>mutate.mutate("do-not-contact")}>Do not contact</button>
             <button className="button secondary" disabled={disabled || item.status==="sent"} onClick={()=>mutate.mutate("reject")}>Reject</button>
           </div>
-          {primary && <button className="button primary full" disabled={disabled} onClick={()=>mutate.mutate(primary.action)}>{primary.label}</button>}
+          {primary && <button className="button primary full" disabled={disabled || !canPrimary(item, primary.action)} onClick={()=>mutate.mutate(primary.action)}>{primary.label}</button>}
           {item.status==="do_not_contact" && <button className="button secondary full" disabled={disabled} onClick={()=>mutate.mutate("allow-contact")}>Allow contact again</button>}
-          {meta.data?.demo_mode && <p className="demo-note">Demo mode is read-only. Actions are intentionally disabled.</p>}
+          {demoMode && <p className="demo-note">Demo mode is read-only. Actions are intentionally disabled.</p>}
         </aside>
       </section>
     </>
@@ -94,6 +124,13 @@ function primaryAction(status:string){
   if(status==="approved") return {label:"Create Gmail draft",action:"gmail-draft"};
   if(status==="gmail_drafted") return {label:"Mark as sent",action:"mark-sent"};
   return null;
+}
+function canPrimary(item: { status: string; draft?: string; contact_email?: string; subject?: string }, action: string): boolean {
+  // Disable impossible primary actions so the operator cannot trigger them.
+  if (action === "approve") return Boolean(item.draft);
+  if (action === "gmail-draft") return Boolean(item.contact_email && item.subject && item.draft);
+  if (action === "mark-sent") return true;
+  return true;
 }
 function proofDescription(proof?:string){
   if(proof==="WingerX") return "AI automation and business orchestration platform with agents, CRM, integrations and scheduled workflows.";

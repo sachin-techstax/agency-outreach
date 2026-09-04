@@ -1,21 +1,47 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Search } from "lucide-react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState, LeadAvatar, Score, StatusPill, fmtAge } from "../components/Primitives";
+import type { RunRow } from "../types";
+
+const BATCH_OPTIONS = [5, 10, 20];
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const dashboard = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard, refetchInterval: 8000 });
   const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
+  const [batchSize, setBatchSize] = useState(10);
+  const [runError, setRunError] = useState("");
+
   const discovery = useMutation({
     mutationFn: () => api.runDiscovery(20),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dashboard"] })
+    onSuccess: () => {
+      setRunError("");
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+    onError: (err: Error) => setRunError(err.message)
+  });
+
+  const process = useMutation({
+    mutationFn: () => api.runProcess(batchSize),
+    onSuccess: () => {
+      setRunError("");
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+    },
+    onError: (err: Error) => setRunError(err.message)
   });
 
   const data = dashboard.data;
   const run = data?.latest_run;
+  const runRow = data?.latest_run_row;
+  const demoMode = Boolean(meta.data?.demo_mode);
+  const runActive = runRow?.status === "running" || runRow?.status === "queued";
+  const anyPending = discovery.isPending || process.isPending || runActive;
 
   return (
     <>
@@ -28,15 +54,34 @@ export function DashboardPage() {
         <div className="header-actions">
           <div className="global-search"><Search size={14} /><span>Search leads or domains</span></div>
           <button className="button secondary">Filter</button>
-          <button className="button primary" disabled={meta.data?.demo_mode || discovery.isPending} onClick={() => discovery.mutate()}>
+          <button
+            className="button secondary"
+            disabled={demoMode || anyPending}
+            onClick={() => discovery.mutate()}
+            title="Run read-only Serper discovery, filtering and ranking"
+          >
             {discovery.isPending ? "Discovering…" : "Run discovery"}
           </button>
+          <div className="batch-selector">
+            <select value={batchSize} onChange={(e) => setBatchSize(Number(e.target.value))} disabled={demoMode || anyPending}>
+              {BATCH_OPTIONS.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <button
+              className="button primary"
+              disabled={demoMode || anyPending}
+              onClick={() => process.mutate()}
+              title="Discover, qualify, draft outreach for fresh prospects. Does NOT send email."
+            >
+              {process.isPending ? "Processing…" : "Process prospects"}
+            </button>
+          </div>
         </div>
       </header>
 
       <section className="page-body">
         {dashboard.isLoading && <div className="loading-line">Loading PactSignal…</div>}
-        {dashboard.error && <div className="error-banner">{(dashboard.error as Error).message}</div>}
+        {runError && <div className="error-banner">{runError}</div>}
+        {runRow && <ActiveRunBanner run={runRow} />}
 
         {data && (
           <>
@@ -96,6 +141,21 @@ export function DashboardPage() {
         )}
       </section>
     </>
+  );
+}
+
+function ActiveRunBanner({ run }: { run: RunRow }) {
+  if (run.status !== "running" && run.status !== "queued") return null;
+  const progress = run.progress as { stage?: string; attempted?: number; target?: number; current_domain?: string } | null;
+  const label = run.type === "discovery" ? "Discovery" : "Process prospects";
+  return (
+    <div className="run-banner">
+      <span className="spinner" />
+      <div>
+        <strong>{label} run in progress</strong>
+        <span>Started {fmtAge(run.started_at)}{progress?.current_domain ? ` · crawling ${progress.current_domain}` : ""}{progress?.attempted != null && progress?.target ? ` · ${progress.attempted}/${progress.target}` : ""}</span>
+      </div>
+    </div>
   );
 }
 

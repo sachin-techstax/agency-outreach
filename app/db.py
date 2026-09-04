@@ -143,11 +143,42 @@ CREATE TABLE IF NOT EXISTS leads (
     followup_due_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status_score ON leads(status, score DESC);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requested_limit INTEGER,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    query_count INTEGER,
+    raw_candidate_domains INTEGER,
+    candidate_domains INTEGER,
+    fresh_retryable_pool INTEGER,
+    attempted INTEGER,
+    processed INTEGER,
+    qualified INTEGER,
+    drafted INTEGER,
+    below_score INTEGER,
+    no_contact INTEGER,
+    skipped INTEGER,
+    failed_count INTEGER,
+    duration_s REAL,
+    error_summary TEXT,
+    progress TEXT,
+    result_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 """
 
 # Columns to add if they don't exist (backward-compatible migration).
 _MIGRATION_COLUMNS = [
     ("contact_quality", "TEXT"),
+]
+
+# Columns to add to the ``runs`` table if missing in older database files.
+_RUN_MIGRATION_COLUMNS = [
+    ("result_json", "TEXT"),
 ]
 
 
@@ -158,6 +189,11 @@ def _migrate(db: sqlite3.Connection) -> None:
         if col_name not in cols:
             db.execute(f"ALTER TABLE leads ADD COLUMN {col_name} {col_type}")
             logger.debug("Added column %s to leads table", col_name)
+    run_cols = {row["name"] for row in db.execute("PRAGMA table_info(runs)").fetchall()}
+    for col_name, col_type in _RUN_MIGRATION_COLUMNS:
+        if col_name not in run_cols:
+            db.execute(f"ALTER TABLE runs ADD COLUMN {col_name} {col_type}")
+            logger.debug("Added column %s to runs table", col_name)
 
 
 def now_iso() -> str:
@@ -384,3 +420,152 @@ def get_suppressed_domains(domains: Iterable[str]) -> dict[str, str]:
         for domain, status in statuses.items()
         if is_suppressed_status(status)
     }
+
+
+# ---------------------------------------------------------------------------
+# Persistent run history
+# ---------------------------------------------------------------------------
+
+# Run lifecycle statuses.
+RUN_QUEUED = "queued"
+RUN_RUNNING = "running"
+RUN_COMPLETED = "completed"
+RUN_FAILED = "failed"
+
+# Run types.  ``processing`` is the user-facing label for the outreach
+# pipeline run; ``discovery`` is the read-only discovery ranking run.
+RUN_TYPE_DISCOVERY = "discovery"
+RUN_TYPE_PROCESSING = "processing"
+
+# Columns that may be updated after creation.  ``type`` and ``started_at`` are
+# immutable once a run row exists.
+_RUN_UPDATE_COLUMNS = (
+    "status", "completed_at", "query_count", "raw_candidate_domains",
+    "candidate_domains", "fresh_retryable_pool", "attempted", "processed",
+    "qualified", "drafted", "below_score", "no_contact", "skipped",
+    "failed_count", "duration_s", "error_summary", "progress", "result_json",
+)
+
+
+def create_run(run_type: str, requested_limit: int | None = None) -> int:
+    """Create a new run row in ``queued`` state and return its id."""
+    init_db()
+    stamp = now_iso()
+    with conn() as db:
+        cur = db.execute(
+            "INSERT INTO runs (type, status, requested_limit, started_at) "
+            "VALUES (?, ?, ?, ?)",
+            (run_type, RUN_QUEUED, requested_limit, stamp),
+        )
+        return int(cur.lastrowid)
+
+
+def update_run(run_id: int, **updates) -> None:
+    """Update specific fields on a run row.
+
+    Only fields in :data:`_RUN_UPDATE_COLUMNS` are written; unknown keys are
+    ignored so callers can pass pipeline summary dicts without filtering.
+    """
+    if not updates:
+        return
+    init_db()
+    allowed = {k: v for k, v in updates.items() if k in _RUN_UPDATE_COLUMNS}
+    if not allowed:
+        return
+    cols = list(allowed)
+    values = [allowed[c] for c in cols] + [run_id]
+    with conn() as db:
+        db.execute(
+            f"UPDATE runs SET {', '.join(f'{c}=?' for c in cols)} WHERE id=?",
+            values,
+        )
+
+
+def set_run_progress(run_id: int, progress: dict) -> None:
+    """Persist a JSON progress snapshot for an active run."""
+    import json as _json
+    update_run(run_id, progress=_json.dumps(progress, separators=(",", ":")))
+
+
+def get_run(run_id: int):
+    """Return the run row (sqlite3.Row) or None."""
+    init_db()
+    with conn() as db:
+        return db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
+
+
+def list_runs(limit: int = 50):
+    """Return recent run rows ordered by most-recent first."""
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs ORDER BY started_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+
+def list_runs_by_type(run_type: str, limit: int = 50):
+    """Return recent run rows of a specific type, most-recent first."""
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs WHERE type=? ORDER BY started_at DESC, id DESC LIMIT ?",
+            (run_type, limit),
+        ).fetchall()
+
+
+def list_runs_by_type_and_status(
+    run_type: str, status: str, limit: int = 50
+):
+    """Return recent run rows of a specific type AND status, most-recent first.
+
+    Used by the Discovery page to retrieve the most recent *completed*
+    discovery run so a later failed attempt does not hide the last
+    successful ranked result (R2-3).
+    """
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs WHERE type=? AND status=? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (run_type, status, limit),
+        ).fetchall()
+
+
+def list_runs_by_status(status: str, limit: int = 50):
+    """Return recent run rows of a specific status, most-recent first.
+
+    Used by ``GET /api/runs?status=failed`` (R3-2) so a status-only filter
+    does not fall through to the unfiltered list.
+    """
+    init_db()
+    with conn() as db:
+        return db.execute(
+            "SELECT * FROM runs WHERE status=? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (status, limit),
+        ).fetchall()
+
+
+def reconcile_abandoned_runs() -> int:
+    """Mark any ``queued`` or ``running`` runs as ``failed``.
+
+    Called on PactSignal startup.  Because background runs execute in daemon
+    threads inside this process, any persisted ``queued`` or ``running`` row
+    found during a fresh startup cannot still have a live worker from the
+    previous process.  Marking them ``failed`` prevents stale runs from
+    permanently disabling the operator UI.
+
+    Returns the number of runs reconciled.  No secrets are stored in the
+    error summary.
+    """
+    init_db()
+    stamp = now_iso()
+    reason = "Interrupted by PactSignal process restart"
+    with conn() as db:
+        cur = db.execute(
+            "UPDATE runs SET status=?, completed_at=?, error_summary=? "
+            "WHERE status IN (?, ?)",
+            (RUN_FAILED, stamp, reason, RUN_QUEUED, RUN_RUNNING),
+        )
+        return cur.rowcount

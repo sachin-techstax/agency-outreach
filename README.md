@@ -86,11 +86,53 @@ The React + FastAPI operator console is implemented as a separate web runtime. I
 
 Core screens:
 
-- **Overview** — pipeline metrics, priority review queue, latest run
+- **Overview** — pipeline metrics, priority review queue, latest run, `Run discovery` and `Process prospects` actions with live run state
 - **Leads** — dense searchable/filterable lead records with preview
-- **Lead Review** — properties, agency intelligence, selected portfolio proof, outreach draft, and human approval actions
+- **Lead Review** — properties, agency intelligence, selected portfolio proof, outreach draft, human approval actions, and `Refresh contact & research`
+- **Discovery** — latest read-only discovery result with ranked candidate rows, query counts, and eligibility metrics
+- **Outreach runs** — persistent run history with per-run details (status, timing, qualified/drafted/failed counts, live progress)
+- **Follow-ups** — sent leads with due follow-up dates
 
 The current visual direction is a bright, record-first **Twenty × Attio** style rather than a generic admin dashboard.
+
+## Operator workflow
+
+The complete operator workflow is now drivable from the PactSignal UI:
+
+```text
+Run discovery
+  → review eligible ranked candidates on the Discovery page
+Process prospects (batch size 5 / 10 / 20)
+  → watches run status instead of wondering whether the request is hanging
+  → opens Leads, sees drafted and rejected-fit leads
+  → opens a drafted lead, sees contact provenance (which page the email came from)
+  → Refresh contact & research (re-crawls without changing protected workflow state)
+  → Approve for Gmail
+  → Create Gmail draft
+  → review + send manually in Gmail
+  → Mark as sent
+  → Due follow-ups appear on the Follow-ups page
+```
+
+`Process prospects` runs the existing outreach-processing pipeline (discovery → suppression → crawl → commercial-fit scoring → analysis → contact discovery → drafting). It does **not** send email. The furthest automatic Gmail action is `Create Gmail draft`, which requires explicit human approval first.
+
+Run state is persisted in SQLite (`runs` table) so the operator can see history and poll active runs without a manual browser refresh. Concurrent processing runs are rejected with `409`.
+
+## Contact discovery
+
+PactSignal crawls a company's homepage plus a bounded, deterministically ranked set of same-domain research pages. The page-priority strategy ranks contact pages above service/work/about/AI pages so a normal `/contact` is not displaced by four arbitrary service pages:
+
+1. `contact`, `contact-us`, `contactus`, `get-in-touch`, `talk-to-us`, `connect` (highest)
+2. `about`, `team`, `who-we-are`, `company`
+3. `services`, `solutions`, `capabilities`
+4. `work`, `case-stud`, `portfolio`, `projects`
+5. `ai`, `agent`, `llm`, `automation`
+
+Irrelevant paths (`/blog`, `/news`, `/legal`, `/jobs`, etc.) are never crawled. URLs are deduplicated by normalized form (fragments and trailing slashes stripped). The crawl is bounded to a small fixed number of extra pages.
+
+Emails are extracted from both visible page text and `mailto:` hrefs. `mailto:hello@example.com?subject=Project` is normalized to `hello@example.com`. Only emails on the company's own domain are accepted; third-party addresses are ignored. Contact provenance is persisted as the actual page URL where the email was found (e.g. `https://launchpadlab.com/contact/`) rather than a generic `website` label.
+
+Contact quality ranking: named/role addresses (`founder@`, `partnerships@`) > generic business addresses (`hello@`, `contact@`, `info@`, `sales@`) > no contact. Inappropriate targets (`privacy@`, `legal@`, `careers@`, `support@`, `noreply@`) are always rejected. PactSignal does not scrape LinkedIn or guess personal email addresses.
 
 ## Demo mode
 
