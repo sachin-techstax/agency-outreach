@@ -824,14 +824,13 @@ def refresh_lead_research(lead_id: int) -> dict:
     has_draft = bool(existing["subject"] or existing["draft"])
     draft_marked_stale = False
     if has_draft:
-        # Fields that directly influence the outreach draft composition.
-        # ``proof_project`` is the most impactful (it changes the proof
-        # example cited in the email), but company, fit_reason,
-        # outreach_angle, summary, and services all feed the draft prompt.
+        # R1-2: Only fields that actually drive draft_outreach() composition
+        # trigger a stale marker.  The draft call is:
+        #   draft_outreach(company, fit_reason, proof_project, outreach_angle)
+        # Changes to summary, services, score, etc. do NOT affect the draft
+        # body and must NOT mark it stale.
         draft_driving_fields = (
             "company",
-            "summary",
-            "services",
             "fit_reason",
             "proof_project",
             "outreach_angle",

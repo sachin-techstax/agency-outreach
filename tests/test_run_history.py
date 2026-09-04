@@ -1458,7 +1458,7 @@ def test_refresh_marks_stale_when_fit_reason_changes(tmp_path, monkeypatch):
         lambda company, website, text: {
             "summary": "same summary",
             "services": "ai",
-            "fit_reason": "NEW fit reason",  # changed
+            "fit_reason": "NEW fit reason",  # changed — draft-driving
             "proof_project": "WingerX",  # unchanged
             "outreach_angle": "same angle",
         },
@@ -1470,6 +1470,60 @@ def test_refresh_marks_stale_when_fit_reason_changes(tmp_path, monkeypatch):
     from app.db import get_lead
     row = get_lead(lead_id)
     assert bool(row["draft_stale"]) is True
+
+
+def test_refresh_does_not_mark_stale_when_only_summary_services_change(tmp_path, monkeypatch):
+    """R1-2: summary and services do NOT drive draft_outreach(), so changes
+    to them must NOT mark the draft stale."""
+    _live_mode(tmp_path)
+    init_db()
+    from app.pipeline import extract_company_name
+    expected_company = extract_company_name("Example", "co.example")
+    lead_id = upsert_lead({
+        "company": expected_company,
+        "domain": "co.example",
+        "website": "https://co.example",
+        "score": 80,
+        "proof_project": "WingerX",
+        "fit_reason": "same fit",
+        "outreach_angle": "same angle",
+        "summary": "old summary",
+        "services": "old services",
+        "contact_email": "hello@co.example",
+        "contact_quality": "medium",
+        "subject": "Existing subject",
+        "draft": "Existing draft body",
+        "status": "drafted",
+    })
+
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company", lambda url: _make_site(STRONG_TEXT, "co.example")
+    )
+    monkeypatch.setattr(
+        pipeline_mod,
+        "analyze_agency",
+        lambda company, website, text: {
+            "summary": "COMPLETELY NEW summary",  # changed — NOT draft-driving
+            "services": "COMPLETELY NEW services",  # changed — NOT draft-driving
+            "fit_reason": "same fit",  # unchanged
+            "proof_project": "WingerX",  # unchanged
+            "outreach_angle": "same angle",  # unchanged
+        },
+    )
+
+    result = pipeline_mod.refresh_lead_research(lead_id)
+    assert result["refreshed"] is True
+    assert result["draft_marked_stale"] is False
+
+    from app.db import get_lead
+    row = get_lead(lead_id)
+    assert bool(row["draft_stale"]) is False
+    # Summary and services were updated (they're always refreshed).
+    assert row["summary"] == "COMPLETELY NEW summary"
+    assert row["services"] == "COMPLETELY NEW services"
+    # Draft body unchanged.
+    assert row["subject"] == "Existing subject"
+    assert row["draft"] == "Existing draft body"
 
 
 def test_regenerate_draft_creates_fresh_draft_and_clears_stale(tmp_path, monkeypatch):
