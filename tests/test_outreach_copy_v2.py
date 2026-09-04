@@ -898,21 +898,145 @@ def test_v2_regenerated_draft_remains_fresh_after_init_db(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_normal_pipeline_stamps_current_copy_version(tmp_path, monkeypatch):
-    """R1-5: Normal pipeline generation stamps draft_copy_version = v2."""
-    from app.db import init_db, upsert_lead, get_lead
-    import tests.test_run_history as trh
+    """R2-5/R2-6: Normal run_pipeline() generation stamps draft_copy_version=v2.
 
-    trh._live_mode(tmp_path)
+    This exercises the actual normal processing path (crawl -> analyze ->
+    draft_outreach -> update_lead), NOT regenerate_draft().  All external
+    boundaries (Serper, scraping, OpenAI, Gmail) are mocked.
+    """
+    from app.db import init_db, get_lead_by_domain
+    from app.config import settings as cfg
+    from app.pipeline import run as run_pipeline
+
+    db_path = tmp_path / "test_pipeline_v2.db"
+    object.__setattr__(cfg, "db_path", db_path)
     init_db()
-    lead_id = upsert_lead(trh._stale_lead(status="drafted"))
 
-    monkeypatch.setattr(pipeline_mod, "draft_outreach", lambda *a: ("Fresh subject", "Fresh body"))
+    # Mock Serper search.
+    from app.search import SearchHit
+    hits = [
+        SearchHit(
+            title="testco.ai - AI Development Agency",
+            url="https://testco.ai",
+            snippet="We build AI agents and custom software for clients.",
+            query="q",
+        )
+    ]
+    monkeypatch.setattr(pipeline_mod, "search_serper", lambda query, num=10: hits)
 
-    result = pipeline_mod.regenerate_draft(lead_id)
-    assert result["regenerated"] is True
+    # Mock website crawl with strong agency text (long enough to pass filters).
+    strong_text = (
+        "We are an AI development agency providing custom software and AI development services "
+        "for clients. We build AI agents, workflow automation, RAG systems, APIs and backend products. "
+        "See our case studies and client projects. Our delivery team helps companies with "
+        "AI implementation and system integration. We are a technology partner and development partner "
+        "offering engineering services and implementation services. "
+        "We deliver production AI systems for clients across multiple industries. "
+        "Our team specializes in LLM development, retrieval augmented generation, "
+        "machine learning, data engineering, and end-to-end AI product engineering. "
+        "Contact us at hello@testco.ai"
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company",
+        lambda url: {
+            "root": "https://testco.ai",
+            "domain": "testco.ai",
+            "title": "TestCo",
+            "text": strong_text,
+            "pages": [],
+        },
+    )
 
-    lead = get_lead(lead_id)
+    # Mock analyze_agency.
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda company, website, text: {
+            "summary": "AI agency",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "AI agents and client delivery",
+        },
+    )
+
+    # Mock draft_outreach.
+    monkeypatch.setattr(
+        pipeline_mod, "draft_outreach",
+        lambda company, fit, proof, angle: ("Pipeline subject", "Pipeline body"),
+    )
+
+    result = run_pipeline(limit=1)
+    assert result["processed"] == 1
+    assert result["drafted"] == 1
+
+    lead = get_lead_by_domain("testco.ai")
+    assert lead is not None
+    assert lead["status"] == "drafted"
+    assert bool(lead["draft_stale"]) is False
     assert lead["draft_copy_version"] == llm_mod.OUTREACH_COPY_VERSION
+    assert lead["subject"] == "Pipeline subject"
+    assert lead["draft"] == "Pipeline body"
+
+
+def test_normal_pipeline_sets_draft_stale_false(tmp_path, monkeypatch):
+    """R2-10: Normal pipeline sets draft_stale=0 (fresh) after generation."""
+    from app.db import init_db, get_lead_by_domain
+    from app.config import settings as cfg
+    from app.pipeline import run as run_pipeline
+
+    db_path = tmp_path / "test_stale_false.db"
+    object.__setattr__(cfg, "db_path", db_path)
+    init_db()
+
+    from app.search import SearchHit
+    hits = [
+        SearchHit(
+            title="staleco.ai - AI Development Agency",
+            url="https://staleco.ai",
+            snippet="We build AI agents and custom software for clients.",
+            query="q",
+        )
+    ]
+    monkeypatch.setattr(pipeline_mod, "search_serper", lambda query, num=10: hits)
+    strong_text = (
+        "We are an AI development agency providing custom software and AI development services "
+        "for clients. We build AI agents, workflow automation, RAG systems, APIs and backend products. "
+        "See our case studies and client projects. Our delivery team helps companies with "
+        "AI implementation and system integration. We are a technology partner and development partner "
+        "offering engineering services and implementation services. "
+        "We deliver production AI systems for clients across multiple industries. "
+        "Our team specializes in LLM development, retrieval augmented generation, "
+        "machine learning, data engineering, and end-to-end AI product engineering. "
+        "Contact us at hello@staleco.ai"
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "crawl_company",
+        lambda url: {
+            "root": "https://staleco.ai",
+            "domain": "staleco.ai",
+            "title": "StaleCo",
+            "text": strong_text,
+            "pages": [],
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "analyze_agency",
+        lambda company, website, text: {
+            "summary": "AI agency",
+            "services": "ai",
+            "fit_reason": "fit",
+            "proof_project": "WingerX",
+            "outreach_angle": "angle",
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_mod, "draft_outreach",
+        lambda company, fit, proof, angle: ("Subject", "Body"),
+    )
+
+    run_pipeline(limit=1)
+    lead = get_lead_by_domain("staleco.ai")
+    assert bool(lead["draft_stale"]) is False
 
 
 def test_explicit_regeneration_stamps_current_copy_version(tmp_path, monkeypatch):
@@ -1014,3 +1138,125 @@ def test_fallback_long_angle_is_truncated():
     body = llm_mod._capability_fallback_body("TestCo", "fit", long_angle)
     # The angle should be truncated — not all 50 words present.
     assert body.count("word") < 50
+
+
+# ---------------------------------------------------------------------------
+# R2-1/R2-2/R2-3: Unsafe fallback angle rejection
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("angle", [
+    "Forge Crew delivery",
+    "forge crew delivery",
+    "FORGE CREW delivery",
+    "Forge-Crew delivery",
+    "Forge   Crew   delivery",
+])
+def test_forge_crew_in_fallback_angle_is_rejected(angle):
+    """R2-1: Forge Crew in any variant in the angle must be rejected."""
+    body = llm_mod._capability_fallback_body("TestCo", "fit", angle)
+    canonical_body = llm_mod._canonical_project_text(body)
+    assert "forge crew" not in canonical_body
+    # Generic hook used (no "around" since angle was discarded).
+    assert "around" not in body.lower()
+
+
+@pytest.mark.parametrize("angle", [
+    "Aegis code review",
+    "aegis code review",
+    "AEGIS code review",
+])
+def test_aegis_in_fallback_angle_is_rejected(angle):
+    """R2-1: Aegis in any variant in the angle must be rejected."""
+    body = llm_mod._capability_fallback_body("TestCo", "fit", angle)
+    canonical_body = llm_mod._canonical_project_text(body)
+    assert "aegis" not in canonical_body
+    assert "around" not in body.lower()
+
+
+def test_safe_angle_is_still_used_normally():
+    """R2-3: A safe angle (no forbidden names) is still used in the fallback."""
+    body = llm_mod._capability_fallback_body("TestCo", "fit", "AI agents and client delivery")
+    assert "AI agents and client delivery" in body
+    assert "around" in body.lower()
+
+
+def test_retry_exception_with_unsafe_angle_still_safe(monkeypatch):
+    """R2-3: Retry exception + unsafe angle -> safe fallback with no private names."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Forge Crew support",
+        "body": "Forge Crew is a great orchestrator.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, RuntimeError("provider timeout")]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach(
+        "TestCo", "fit", "Forge Crew", "Forge Crew multi-agent delivery"
+    )
+    assert "forge crew" not in subject.lower()
+    assert "forge crew" not in body.lower()
+    assert "aegis" not in body.lower()
+    assert subject == "Extra AI delivery capacity"
+
+
+def test_second_unsafe_response_with_unsafe_angle_still_safe(monkeypatch):
+    """R2-3: Second unsafe LLM response + unsafe angle -> safe fallback."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Forge Crew for you",
+        "body": "Forge Crew orchestrator is great.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "AEGIS review",
+        "body": "aegis code review agent.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach(
+        "TestCo", "fit", "Forge Crew", "Forge Crew multi-agent delivery"
+    )
+    assert "forge crew" not in subject.lower()
+    assert "forge crew" not in body.lower()
+    assert "aegis" not in subject.lower()
+    assert "aegis" not in body.lower()
+    assert subject == "Extra AI delivery capacity"
+
+
+# ---------------------------------------------------------------------------
+# R2-4: Exact token-sequence matching (no false positives)
+# ---------------------------------------------------------------------------
+
+def test_aegisian_does_not_falsely_match_aegis():
+    """R2-4: 'Aegisian' must NOT be identified as the private project 'Aegis'."""
+    result = llm_mod._contains_forbidden_project("Aegisian systems")
+    assert result is None
+
+
+def test_aegis_as_standalone_word_still_matches():
+    """R2-4: 'Aegis' as a standalone word must still be detected."""
+    result = llm_mod._contains_forbidden_project("Aegis code review")
+    assert result == "Aegis"
+
+
+def test_forge_crew_normalized_variants_still_match():
+    """R2-4: Existing Forge Crew normalized variants still match."""
+    for variant in ["Forge Crew", "forge crew", "FORGE CREW", "Forge-Crew", "Forge   Crew"]:
+        result = llm_mod._contains_forbidden_project(variant)
+        assert result == "Forge Crew", f"Failed for variant: {variant}"
+
+
+def test_forge_crew_as_part_of_larger_word_does_not_false_match():
+    """R2-4: 'ForgeCrews' (no separator) should not match 'Forge Crew'."""
+    # After canonicalization, "forgecrews" has no space, so "forge crew"
+    # (with space) should not be found as a token sequence.
+    result = llm_mod._contains_forbidden_project("ForgeCrews system")
+    # "forgecrews" canonicalizes to "forgecrews" — no space between forge and crew,
+    # so "forge crew" (with space) won't match.
+    assert result is None

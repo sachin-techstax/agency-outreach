@@ -115,12 +115,22 @@ def _contains_forbidden_project(text: str) -> str | None:
     R1-1: Matching is case-insensitive and separator-normalized so that
     variants such as ``forge crew``, ``FORGE CREW``, ``Forge-Crew``, and
     ``Forge   Crew`` are all detected.  No fuzzy/semantic matching is used.
+
+    R2-4: Matching uses exact token sequences, not arbitrary substring
+    matching.  This prevents false positives such as ``Aegisian`` matching
+    ``Aegis``.  Both the haystack and needle are padded with spaces so
+    that only whole-token-sequence boundaries match.
     """
     if not text:
         return None
     canonical_text = _canonical_project_text(text)
+    # Pad with spaces so that token-sequence boundaries are respected.
+    # "aegis" should NOT match inside "aegisian" because "aegisian" has
+    # extra characters appended without a separator.
+    haystack = f" {canonical_text} "
     for canonical_name, original_name in _FORBIDDEN_CANONICAL.items():
-        if canonical_name in canonical_text:
+        needle = f" {canonical_name} "
+        if needle in haystack:
             return original_name
     return None
 
@@ -135,6 +145,12 @@ def _sanitize_angle(angle: str, max_words: int = 12) -> str:
 
     Keeps it short, grounded, and free of fabricated claims.  Strips
     trailing punctuation and limits to ``max_words`` words.
+
+    R2-1/R2-2: If the angle contains a non-nameable project name (in any
+    supported variant), the entire angle is discarded and ``""`` is
+    returned.  This prevents the deterministic fallback from reintroducing
+    a private project name through the angle.  We do not attempt clever
+    word deletion — if the angle is unsafe, we discard it wholesale.
     """
     if not angle:
         return ""
@@ -144,7 +160,11 @@ def _sanitize_angle(angle: str, max_words: int = 12) -> str:
     words = cleaned.split()
     if len(words) > max_words:
         words = words[:max_words]
-    return " ".join(words)
+    result = " ".join(words)
+    # R2-1: Reject angles containing forbidden project names.
+    if _contains_forbidden_project(result):
+        return ""
+    return result
 
 
 def _capability_fallback_body(
