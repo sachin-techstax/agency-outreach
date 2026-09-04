@@ -109,6 +109,58 @@ def _client() -> OpenAI | None:
     return OpenAI(api_key=settings.openai_api_key)
 
 
+# R3-5/R4: Sender-proof verb phrases (canonical form) that indicate the
+# prospect company name is being used as the sender's own work, not as a
+# recipient identity reference.  Checked against the text immediately
+# preceding a company-name occurrence.
+_SENDER_PROOF_PREFIXES = (
+    "i built ",
+    "i ve built ",
+    "i developed ",
+    "i created ",
+    "i made ",
+    "i shipped ",
+    "i designed ",
+    "i wrote ",
+    "i deployed ",
+)
+
+
+def _has_sender_proof_context(haystack: str, canonical_company: str) -> bool:
+    """R4: Check if any occurrence of the company name is preceded by a
+    sender-proof verb phrase (e.g. ``i built {company}``).
+
+    Deterministic — no semantic classification.  Only simple canonical
+    prefix matching is used.
+    """
+    # Search for the company name without the leading space in the needle
+    # so that ``before`` includes the space that precedes the company name.
+    company_needle = canonical_company
+    idx = 0
+    while True:
+        pos = haystack.find(company_needle, idx)
+        if pos == -1:
+            return False
+        # Verify this is a token-boundary match (preceded by space or start).
+        if pos > 0 and haystack[pos - 1] != " ":
+            idx = pos + len(company_needle)
+            continue
+        # Verify token boundary after the company name.
+        after_pos = pos + len(company_needle)
+        if after_pos < len(haystack) and haystack[after_pos] not in (" ", ""):
+            idx = pos + len(company_needle)
+            continue
+        # Check the text immediately before the company-name occurrence.
+        # ``before`` ends with the space that precedes the company name.
+        before = haystack[:pos]
+        for prefix in _SENDER_PROOF_PREFIXES:
+            # prefix includes trailing space, e.g. "i built "
+            if before.endswith(prefix):
+                return True
+        idx = pos + len(company_needle)
+    return False
+
+
 def _contains_forbidden_project(text: str, *, company: str = "") -> str | None:
     """Return the original forbidden project name found in *text*, or ``None``.
 
@@ -121,35 +173,82 @@ def _contains_forbidden_project(text: str, *, company: str = "") -> str | None:
     ``Aegis``.  Both the haystack and needle are padded with spaces so
     that only whole-token-sequence boundaries match.
 
-    R3-5/R3-6: When *company* is supplied, a forbidden project-name
+    R3-5/R3-6/R4: When *company* is supplied, a forbidden project-name
     occurrence that is part of the prospect's company name is tolerated
-    (it is the recipient's identity, not sender proof).  Forbidden-name
-    occurrences elsewhere in the text are still detected.  The company
-    name is canonicalized and removed from the haystack before checking,
-    so that ``Aegis Labs builds...`` does not trigger when the prospect
-    is ``Aegis Labs``, but ``I built Aegis as a code-review agent`` still
-    does.
+    ONLY when it is a legitimate recipient identity reference (e.g.
+    ``Aegis Labs' AI delivery work...``).  It is NOT tolerated when the
+    full company name appears in a sender-proof context (e.g.
+    ``I built Aegis Labs as a code-review system``) or when the forbidden
+    name appears standalone outside the company name (e.g.
+    ``I built Aegis as a code-review agent``).
+
+    The algorithm is deterministic:
+      1. Check if the forbidden name appears standalone in the text.
+      2. Check if the company name (containing the forbidden name) appears
+         in the text.
+      3. If the forbidden name appears standalone:
+         a. If no company context, or the forbidden name is not part of
+            the company name, reject.
+         b. If the company name is supplied and contains the forbidden
+            name as a token subset, remove company-name occurrences and
+            check if standalone occurrences remain → if so, reject.
+      4. If the forbidden name does NOT appear standalone but the company
+         name does (and the forbidden name is a token subset of the
+         company name), check if any company-name occurrence is in a
+         sender-proof context → if so, reject.
+      5. Otherwise, tolerate (recipient identity reference).
     """
     if not text:
         return None
     canonical_text = _canonical_project_text(text)
     haystack = f" {canonical_text} "
 
-    # R3-5/R3-6: If a prospect company name is supplied, remove its
-    # canonical form from the haystack so that the prospect's own identity
-    # does not trigger a false forbidden-name detection.  Only occurrences
-    # of the forbidden name OUTSIDE the company identity are flagged.
-    if company:
-        canonical_company = _canonical_project_text(company)
-        if canonical_company:
-            # Remove all occurrences of the canonical company phrase.
-            # This is deterministic — no semantic classification.
-            haystack = haystack.replace(f" {canonical_company} ", " ")
+    canonical_company = _canonical_project_text(company) if company else ""
 
     for canonical_name, original_name in _FORBIDDEN_CANONICAL.items():
-        needle = f" {canonical_name} "
-        if needle in haystack:
-            return original_name
+        forbidden_needle = f" {canonical_name} "
+        company_needle = f" {canonical_company} " if canonical_company else ""
+        # Is the forbidden name a token-subset of the company name?
+        is_subset = (
+            canonical_company
+            and forbidden_needle in f" {canonical_company} "
+        )
+
+        # Step 1: Does the forbidden name appear standalone?
+        forbidden_standalone = forbidden_needle in haystack
+
+        # Step 2: Does the company name appear in the text?
+        company_present = bool(company_needle) and company_needle in haystack
+
+        if not forbidden_standalone and not (is_subset and company_present):
+            # Neither standalone forbidden name nor company name present.
+            continue
+
+        if forbidden_standalone:
+            # Forbidden name appears standalone somewhere.
+            if not canonical_company or not is_subset:
+                # No company context or forbidden name is not part of
+                # company name → always reject.
+                return original_name
+            # Forbidden name is a token subset of company name.
+            # Remove full company-name occurrences and check if standalone
+            # occurrences remain outside the company name.
+            remaining = haystack.replace(company_needle, " ")
+            if forbidden_needle in remaining:
+                return original_name
+            # All standalone occurrences were part of the full company name.
+            # Fall through to sender-proof context check below.
+
+        # Step 4: Company name present, forbidden name is a token subset.
+        # Check if any company-name occurrence is in a sender-proof context.
+        if is_subset and company_present:
+            if _has_sender_proof_context(haystack, canonical_company):
+                return original_name
+
+        # All occurrences are legitimate recipient identity references.
+        # Tolerate and continue checking other forbidden names.
+        continue
+
     return None
 
 

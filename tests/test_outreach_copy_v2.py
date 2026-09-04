@@ -1540,3 +1540,156 @@ def test_aegis_prospect_unsafe_angle_with_sender_proof_rejected():
     angle = llm_mod._sanitize_angle("Aegis code review agent", company="Aegis Labs")
     # "Aegis" here is standalone (not "Aegis Labs"), so it should be rejected.
     assert angle == ""
+
+
+# ---------------------------------------------------------------------------
+# R4: Full-company sender-proof rejection
+# ---------------------------------------------------------------------------
+
+def test_aegis_labs_recipient_identity_allowed():
+    """R4: 'Aegis Labs' AI delivery work...' is a legitimate recipient reference."""
+    result = llm_mod._contains_forbidden_project(
+        "Aegis Labs' AI delivery work looks relevant",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_aegis_standalone_sender_proof_rejected():
+    """R4: 'I built Aegis as an autonomous code-review system' is rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Aegis as an autonomous code-review system",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_aegis_labs_full_company_sender_proof_rejected():
+    """R4: 'I built Aegis Labs as an autonomous code-review system' is rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Aegis Labs as an autonomous code-review system",
+        company="Aegis Labs",
+    )
+    assert result == "Aegis"
+
+
+def test_forge_crew_studios_recipient_identity_allowed():
+    """R4: 'Forge Crew Studios works on AI delivery' is a legitimate recipient reference."""
+    result = llm_mod._contains_forbidden_project(
+        "Forge Crew Studios works on AI delivery",
+        company="Forge Crew Studios",
+    )
+    assert result is None
+
+
+def test_forge_crew_standalone_sender_proof_rejected():
+    """R4: 'Forge Crew is one of my multi-agent projects' is rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "Forge Crew is one of my multi-agent projects",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_forge_crew_studios_full_company_sender_proof_rejected():
+    """R4: 'I built Forge Crew Studios for multi-agent orchestration' is rejected."""
+    result = llm_mod._contains_forbidden_project(
+        "I built Forge Crew Studios for multi-agent orchestration",
+        company="Forge Crew Studios",
+    )
+    assert result == "Forge Crew"
+
+
+def test_aegis_labs_sender_proof_triggers_retry(monkeypatch):
+    """R4: End-to-end — 'I built Aegis Labs' in body triggers corrective retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I built Aegis Labs as an autonomous code-review system for your team.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Aegis Labs' AI delivery work looks relevant. I build agentic systems.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
+    assert client.responses.create.call_count == 2
+    # Retry body legitimately refers to the prospect company.
+    assert "Aegis Labs" in body
+
+
+def test_forge_crew_studios_sender_proof_triggers_retry(monkeypatch):
+    """R4: End-to-end — 'I built Forge Crew Studios' in body triggers corrective retry."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Overflow AI engineering",
+        "body": "I built Forge Crew Studios for multi-agent orchestration.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Forge Crew Studios works on AI delivery. I can plug in as overflow capacity.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Forge Crew Studios", "fit", "Forge Crew", "angle")
+    assert client.responses.create.call_count == 2
+    assert "Forge Crew Studios" in body
+
+
+def test_retry_with_legitimate_prospect_reference_passes(monkeypatch):
+    """R4: A retry that legitimately refers to the prospect company passes."""
+    _set_openai_key("test-key")
+
+    first = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "I built Aegis Labs as a code review system.",
+    }))
+    second = _mock_response(json.dumps({
+        "subject": "Extra AI delivery capacity",
+        "body": "Aegis Labs' AI agent work looks relevant to what I build day to day.",
+    }))
+
+    client = MagicMock()
+    client.responses.create.side_effect = [first, second]
+    monkeypatch.setattr(llm_mod, "_client", lambda: client)
+
+    subject, body = llm_mod.draft_outreach("Aegis Labs", "fit", "Aegis", "angle")
+    assert client.responses.create.call_count == 2
+    # The retry body is accepted — no further retry.
+    assert "Aegis Labs" in body
+
+
+def test_other_sender_proof_verbs_also_rejected():
+    """R4: Other sender-proof verbs (developed, created, shipped) also rejected."""
+    for verb in ["developed", "created", "shipped", "designed", "wrote", "deployed"]:
+        text = f"I {verb} Aegis Labs for code review."
+        result = llm_mod._contains_forbidden_project(text, company="Aegis Labs")
+        assert result == "Aegis", f"Failed for verb: {verb}"
+
+
+def test_non_sender_proof_context_allowed():
+    """R4: Company name in non-sender-proof context is allowed."""
+    # Company name as sentence subject (not preceded by sender-proof verb).
+    result = llm_mod._contains_forbidden_project(
+        "Aegis Labs builds AI agents for clients.",
+        company="Aegis Labs",
+    )
+    assert result is None
+
+
+def test_company_name_with_possessive_allowed():
+    """R4: Possessive form of company name is a recipient reference."""
+    result = llm_mod._contains_forbidden_project(
+        "Aegis Labs' work in AI delivery is impressive.",
+        company="Aegis Labs",
+    )
+    assert result is None
