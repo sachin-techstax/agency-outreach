@@ -1,24 +1,24 @@
-# PactSignal operator API token
+# Nuntago operator API token
 
-PactSignal private mode uses a single static bearer token for the operator API.
+Nuntago private mode uses a single static bearer token for the operator API.
 
 This is intentionally simpler than user accounts or JWT session issuance because
-PactSignal currently has one operator.
+Nuntago currently has one operator.
 
 ```text
 browser UI
   -> operator enters token once per browser tab/session
   -> token stored in sessionStorage
   -> frontend sends Authorization: Bearer <token>
-  -> FastAPI compares it to PACTSIGNAL_API_TOKEN
+  -> FastAPI compares it to NUNTAGO_API_TOKEN
   -> protected /api/* request proceeds
 ```
 
 ## Production configuration
 
 ```dotenv
-PACTSIGNAL_AUTH_ENABLED=true
-PACTSIGNAL_API_TOKEN=<high-entropy-secret>
+NUNTAGO_AUTH_ENABLED=true
+NUNTAGO_API_TOKEN=<high-entropy-secret>
 ```
 
 Generate the token on the server:
@@ -36,7 +36,7 @@ would provide no meaningful API protection.
 All `/api/*` endpoints require:
 
 ```http
-Authorization: Bearer <PACTSIGNAL_API_TOKEN>
+Authorization: Bearer <NUNTAGO_API_TOKEN>
 ```
 
 except:
@@ -49,7 +49,7 @@ Health remains public so deployment and reverse-proxy health checks can work.
 
 ## Browser behavior
 
-The operator enters the token in the PactSignal unlock screen. The frontend
+The operator enters the token in the Nuntago unlock screen. The frontend
 stores it in `sessionStorage`, so it survives page reloads in the same tab but
 is not persisted as a long-lived local token. Signing out removes it.
 
@@ -59,6 +59,4 @@ is not persisted as a long-lived local token. Signing out removes it.
 A production deploy therefore fails readiness if authentication is disabled or
 the configured token is shorter than 32 characters.
 
-Keep Caddy Basic Auth enabled during rollout. Once the token-authenticated
-PactSignal release is deployed and verified, remove Caddy Basic Auth so the
-normal PactSignal unlock screen is the only access prompt.
+Nuntago is intentionally detached from the Gradewise Caddy stack. A future umbrella-domain proxy can terminate TLS and forward to the localhost-bound Nuntago runtime.

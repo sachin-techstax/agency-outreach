@@ -19,9 +19,9 @@ export function Shell() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-block">
-          <div className="brand-mark">P</div>
+          <div className="brand-mark">N</div>
           <div>
-            <div className="brand-name">PactSignal</div>
+            <div className="brand-name">Nuntago</div>
             <div className="brand-subtitle">Partner intelligence & outreach</div>
           </div>
         </div>

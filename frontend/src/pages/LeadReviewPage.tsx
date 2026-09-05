@@ -131,7 +131,7 @@ export function LeadReviewPage() {
           <Label>Selected proof</Label><div className="proof-card large"><strong>{item.proof_project || "—"}</strong><p>{proofDescription(item.proof_project)}</p></div>
           <Label>Qualification evidence</Label><div className="evidence-list">{(item.score_reason_list?.length ? item.score_reason_list : ["No deterministic reasons stored"]).map((reason)=><div key={reason}><span>{reason}</span><strong>Signal</strong></div>)}</div>
           <div className="section-rule"/>
-          <Label>AI note</Label><p className="ai-note">{item.outreach_angle || "PactSignal will show the strongest outreach angle after qualification."}</p>
+          <Label>AI note</Label><p className="ai-note">{item.outreach_angle || "Nuntago will show the strongest outreach angle after qualification."}</p>
           {item.website && <a className="button secondary inline-link" href={item.website} target="_blank" rel="noreferrer">Open source site <ExternalLink size={13}/></a>}
         </section>
 
@@ -221,5 +221,5 @@ function proofDescription(proof?:string){
   if(proof==="WingerX") return "AI automation and business orchestration platform with agents, CRM, integrations and scheduled workflows.";
   if(proof==="Forge Crew") return "Local-first multi-agent software engineering orchestrator with planner, implementation, review and human approval.";
   if(proof==="Aegis") return "Autonomous AI code-review and repository-hygiene agent with deterministic scanning and human approval.";
-  return "Relevant proof project selected by PactSignal.";
+  return "Relevant proof project selected by Nuntago.";
 }

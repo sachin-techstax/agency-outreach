@@ -491,14 +491,14 @@ def test_demo_mode_blocks_regeneration(tmp_path):
     import tests.test_run_history as trh
 
     trh._live_mode(tmp_path)
-    object.__setattr__(cfg_settings, "pactsignal_demo_mode", True)
+    object.__setattr__(cfg_settings, "nuntago_demo_mode", True)
     init_db()
     lead_id = upsert_lead(trh._stale_lead(status="drafted"))
 
     client = TestClient(api_mod.app)
     resp = client.post(f"/api/leads/{lead_id}/regenerate-draft")
     assert resp.status_code == 403
-    object.__setattr__(cfg_settings, "pactsignal_demo_mode", False)
+    object.__setattr__(cfg_settings, "nuntago_demo_mode", False)
 
 
 # ---------------------------------------------------------------------------

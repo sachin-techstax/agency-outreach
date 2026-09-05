@@ -13,10 +13,10 @@ from app.db import get_lead, upsert_lead, update_lead
 @pytest.fixture(autouse=True)
 def restore_settings():
     names = [
-        "pactsignal_demo_mode",
+        "nuntago_demo_mode",
         "db_path",
-        "pactsignal_auth_enabled",
-        "pactsignal_api_token",
+        "nuntago_auth_enabled",
+        "nuntago_api_token",
     ]
     original = {name: getattr(settings, name) for name in names}
     yield
@@ -25,7 +25,7 @@ def restore_settings():
 
 
 def test_demo_dashboard_and_leads_are_safe():
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     client = TestClient(api_mod.app)
 
     dashboard = client.get("/api/dashboard")
@@ -41,7 +41,7 @@ def test_demo_dashboard_and_leads_are_safe():
 
 
 def test_demo_mode_blocks_mutations_and_external_actions():
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     client = TestClient(api_mod.app)
 
     for path in [
@@ -56,7 +56,7 @@ def test_demo_mode_blocks_mutations_and_external_actions():
 
 
 def test_live_lead_approve_and_reject(tmp_path: Path):
-    object.__setattr__(settings, "pactsignal_demo_mode", False)
+    object.__setattr__(settings, "nuntago_demo_mode", False)
     object.__setattr__(settings, "db_path", tmp_path / "operator-api.db")
 
     lead_id = upsert_lead({
@@ -82,7 +82,7 @@ def test_live_lead_approve_and_reject(tmp_path: Path):
 
 
 def test_lead_search_filters_domain_and_proof(tmp_path: Path):
-    object.__setattr__(settings, "pactsignal_demo_mode", False)
+    object.__setattr__(settings, "nuntago_demo_mode", False)
     object.__setattr__(settings, "db_path", tmp_path / "search.db")
 
     upsert_lead({
@@ -114,11 +114,11 @@ def test_health_reports_product_name():
     client = TestClient(api_mod.app)
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json()["product"] == "PactSignal"
+    assert response.json()["product"] == "Nuntago"
 
 
 def test_private_leads_initializes_fresh_database(tmp_path: Path):
-    object.__setattr__(settings, "pactsignal_demo_mode", False)
+    object.__setattr__(settings, "nuntago_demo_mode", False)
     object.__setattr__(settings, "db_path", tmp_path / "fresh.db")
 
     client = TestClient(api_mod.app)
@@ -129,7 +129,7 @@ def test_private_leads_initializes_fresh_database(tmp_path: Path):
 
 
 def test_demo_leads_total_is_before_limit():
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     client = TestClient(api_mod.app)
 
     response = client.get("/api/leads?limit=2")
@@ -143,7 +143,7 @@ def test_demo_leads_total_is_before_limit():
 def test_spa_path_containment_rejects_parent_escape(tmp_path: Path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "index.html").write_text("<html>PactSignal</html>", encoding="utf-8")
+    (dist / "index.html").write_text("<html>Nuntago</html>", encoding="utf-8")
     outside = tmp_path / "secret.txt"
     outside.write_text("must-not-leak", encoding="utf-8")
 
@@ -158,8 +158,8 @@ def test_spa_path_containment_rejects_parent_escape(tmp_path: Path, monkeypatch)
 
 def _enable_test_auth() -> str:
     token = "test-token-" + ("x" * 40)
-    object.__setattr__(settings, "pactsignal_auth_enabled", True)
-    object.__setattr__(settings, "pactsignal_api_token", token)
+    object.__setattr__(settings, "nuntago_auth_enabled", True)
+    object.__setattr__(settings, "nuntago_api_token", token)
     return token
 
 
@@ -173,13 +173,13 @@ def test_auth_enabled_keeps_health_public_but_protects_operator_api():
 
     dashboard = client.get("/api/dashboard")
     assert dashboard.status_code == 401
-    assert dashboard.json()["detail"] == "Valid PactSignal bearer token required"
+    assert dashboard.json()["detail"] == "Valid Nuntago bearer token required"
     assert dashboard.headers["www-authenticate"] == "Bearer"
 
 
 def test_valid_bearer_token_unlocks_operator_api():
     token = _enable_test_auth()
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     client = TestClient(api_mod.app)
 
     response = client.get(

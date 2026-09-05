@@ -1,12 +1,12 @@
-# PactSignal
+# Nuntago
 
 **Partner intelligence & outreach.**
 
-PactSignal is a human-approved partner discovery and outreach platform for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
+Nuntago is a human-approved partner discovery and outreach platform for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
 
-It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. PactSignal intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
+It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. Nuntago intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
 
-The repository name and SQLite filename still use the original `agency-outreach` identifier for migration stability. PactSignal is the product name.
+The repository, runtime, deployment paths and operator tooling all use the Nuntago identity.
 
 ## What it does
 
@@ -30,57 +30,57 @@ The repository name and SQLite filename still use the original `agency-outreach`
 
 Edit `PORTFOLIO` in `app/llm.py` if you want different wording.
 
-# PactSignal CLI
+# Nuntago CLI
 
-The existing pipeline is also available as the PactSignal operator CLI. Existing commands remain compatible, but the CLI is now product-branded and includes runtime inspection helpers.
+The existing pipeline is also available as the Nuntago operator CLI. Existing commands remain compatible, but the CLI is now product-branded and includes runtime inspection helpers.
 
 Local entry points:
 
 ```bash
-./pactsignal --help
+./nuntago --help
 python -m app --help
 ```
 
 Docker entry point:
 
 ```bash
-docker compose run --rm outreach --help
+docker compose run --rm nuntago-cli --help
 ```
 
 Useful operator commands:
 
 ```bash
 # Safe local inspection
-./pactsignal status
-./pactsignal doctor
+./nuntago status
+./nuntago doctor
 
 # Discovery-only ranking, no crawl/LLM/Gmail/DB writes
-./pactsignal discover --limit 20
+./nuntago discover --limit 20
 
 # Full discovery + qualification + outreach drafting
-./pactsignal run --limit 10
+./nuntago run --limit 10
 
 # Human review workflow
-./pactsignal list --status drafted --min-score 70
-./pactsignal show 12
-./pactsignal approve 12
-./pactsignal reject 13
-./pactsignal do-not-contact 14
+./nuntago list --status drafted --min-score 70
+./nuntago show 12
+./nuntago approve 12
+./nuntago reject 13
+./nuntago do-not-contact 14
 
 # Gmail remains draft-only
-./pactsignal gmail-drafts --limit 10
-./pactsignal mark-sent 12
+./nuntago gmail-drafts --limit 10
+./nuntago mark-sent 12
 
 # Start API/UI from the CLI
-./pactsignal serve
-./pactsignal serve --demo --port 8080
+./nuntago serve
+./nuntago serve --demo --port 8080
 ```
 
-`pactsignal doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
+`nuntago doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
 
-The `serve --demo` path forces PactSignal's fictional, read-only portfolio mode. Private mode still requires network-level protection because application authentication has not been added yet.
+The `serve --demo` path forces Nuntago's fictional, read-only portfolio mode. Private mode still requires network-level protection because application authentication has not been added yet.
 
-# PactSignal operator console
+# Nuntago operator console
 
 The React + FastAPI operator console is implemented as a separate web runtime. It uses the same SQLite database and existing pipeline primitives as the CLI.
 
@@ -97,7 +97,7 @@ The current visual direction is a bright, record-first **Twenty × Attio** style
 
 ## Operator workflow
 
-The complete operator workflow is now drivable from the PactSignal UI:
+The complete operator workflow is now drivable from the Nuntago UI:
 
 ```text
 Run discovery
@@ -120,7 +120,7 @@ Run state is persisted in SQLite (`runs` table) so the operator can see history 
 
 ## Contact discovery
 
-PactSignal crawls a company's homepage plus a bounded, deterministically ranked set of same-domain research pages. The page-priority strategy ranks contact pages above service/work/about/AI pages so a normal `/contact` is not displaced by four arbitrary service pages:
+Nuntago crawls a company's homepage plus a bounded, deterministically ranked set of same-domain research pages. The page-priority strategy ranks contact pages above service/work/about/AI pages so a normal `/contact` is not displaced by four arbitrary service pages:
 
 1. `contact`, `contact-us`, `contactus`, `get-in-touch`, `talk-to-us`, `connect` (highest)
 2. `about`, `team`, `who-we-are`, `company`
@@ -132,14 +132,14 @@ Irrelevant paths (`/blog`, `/news`, `/legal`, `/jobs`, etc.) are never crawled. 
 
 Emails are extracted from both visible page text and `mailto:` hrefs. `mailto:hello@example.com?subject=Project` is normalized to `hello@example.com`. Only emails on the company's own domain are accepted; third-party addresses are ignored. Contact provenance is persisted as the actual page URL where the email was found (e.g. `https://launchpadlab.com/contact/`) rather than a generic `website` label.
 
-Contact quality ranking: named/role addresses (`founder@`, `partnerships@`) > generic business addresses (`hello@`, `contact@`, `info@`, `sales@`) > no contact. Inappropriate targets (`privacy@`, `legal@`, `careers@`, `support@`, `noreply@`) are always rejected. PactSignal does not scrape LinkedIn or guess personal email addresses.
+Contact quality ranking: named/role addresses (`founder@`, `partnerships@`) > generic business addresses (`hello@`, `contact@`, `info@`, `sales@`) > no contact. Inappropriate targets (`privacy@`, `legal@`, `careers@`, `support@`, `noreply@`) are always rejected. Nuntago does not scrape LinkedIn or guess personal email addresses.
 
 ## Demo mode
 
 For portfolio/screenshare use, enable:
 
 ```env
-PACTSIGNAL_DEMO_MODE=true
+NUNTAGO_DEMO_MODE=true
 ```
 
 Demo mode serves fictional `.demo` agencies and is intentionally read-only. It blocks:
@@ -150,15 +150,15 @@ Demo mode serves fictional `.demo` agencies and is intentionally read-only. It b
 - sent-state mutation
 - any other persistent/external action exposed by the operator API
 
-This makes it safe to show PactSignal publicly without exposing prospect data or triggering real outreach.
+This makes it safe to show Nuntago publicly without exposing prospect data or triggering real outreach.
 
 ## Run the web UI
 
-Build and start only the PactSignal web service:
+Build and start only the Nuntago web service:
 
 ```bash
-docker compose build pactsignal-web
-docker compose up pactsignal-web
+docker compose build nuntago-web
+docker compose up nuntago-web
 ```
 
 The Compose service binds to localhost by default:
@@ -178,7 +178,7 @@ curl http://localhost:8080/api/health
 Expected product field:
 
 ```json
-{"ok":true,"product":"PactSignal"}
+{"ok":true,"product":"Nuntago"}
 ```
 
 For frontend-only development:
@@ -195,7 +195,7 @@ npm run dev
 
 Vite runs on `http://localhost:5173` and proxies `/api` to FastAPI on port 8080.
 
-> Private mode currently assumes network-level protection. Do not expose a private-mode PactSignal instance directly to the public internet until authentication is added. Demo mode is the safe public/portfolio mode.
+> Private mode currently assumes network-level protection. Do not expose a private-mode Nuntago instance directly to the public internet until authentication is added. Demo mode is the safe public/portfolio mode.
 
 # Docker quick start
 
@@ -204,8 +204,8 @@ Docker Compose is the recommended runtime.
 ## 1. Clone and configure
 
 ```bash
-git clone https://github.com/sachin-techstax/agency-outreach.git
-cd agency-outreach
+git clone https://github.com/sachin-techstax/nuntago.git
+cd nuntago
 
 cp .env.example .env
 mkdir -p data secrets
@@ -245,19 +245,19 @@ make build
 ## 3. Initialize the database
 
 ```bash
-docker compose run --rm outreach init-db
+docker compose run --rm nuntago-cli init-db
 ```
 
 The SQLite database is persisted at:
 
 ```text
-./data/agency_outreach.db
+./data/nuntago.db
 ```
 
 ## 4. Run discovery and qualification
 
 ```bash
-docker compose run --rm outreach run --limit 15
+docker compose run --rm nuntago-cli run --limit 15
 ```
 
 Or:
@@ -269,13 +269,13 @@ make run LIMIT=15
 The pipeline prints a startup banner and live stage-by-stage progress so you can see exactly what it is doing:
 
 ```text
-Agency Outreach
----------------
+Nuntago
+-------
 Limit:            15
 Minimum score:    70
 OpenAI:           enabled
 Serper:           configured
-Database:         /data/agency_outreach.db
+Database:         /data/nuntago.db
 Log level:        INFO
 
 2026-09-02 21:58:11 | INFO  | pipeline | Starting agency discovery. Target: 15
@@ -322,7 +322,7 @@ If `SERPER_API_KEY` is missing, the `run` command fails immediately with a clear
 To see DEBUG-level detail (every page fetched, HTTP status codes, response lengths, JSON recovery, DB inserts/updates) for a single run without editing `.env`:
 
 ```bash
-docker compose run --rm outreach run --limit 1 --verbose
+docker compose run --rm nuntago-cli run --limit 1 --verbose
 ```
 
 Alternatively, set `LOG_LEVEL=DEBUG` in `.env` or pass it explicitly to the container:
@@ -336,13 +336,13 @@ docker compose run --rm -e LOG_LEVEL=DEBUG outreach run --limit 1
 Set `LOG_FILE` in `.env` to mirror logs to a rotating file (5 MB per file, 3 backups):
 
 ```env
-LOG_FILE=/data/agency-outreach.log
+LOG_FILE=/data/nuntago.log
 ```
 
 When enabled inside Docker, the log file persists on the host at:
 
 ```text
-./data/agency-outreach.log
+./data/nuntago.log
 ```
 
 If `LOG_FILE` is blank, only console output is produced.
@@ -361,15 +361,15 @@ Logs never print API keys, OAuth tokens, or full scraped website text.
 ## 5. Review leads
 
 ```bash
-docker compose run --rm outreach list --status drafted --min-score 70
-docker compose run --rm outreach show 12
+docker compose run --rm nuntago-cli list --status drafted --min-score 70
+docker compose run --rm nuntago-cli show 12
 ```
 
 Approve or reject:
 
 ```bash
-docker compose run --rm outreach approve 12
-docker compose run --rm outreach reject 13
+docker compose run --rm nuntago-cli approve 12
+docker compose run --rm nuntago-cli reject 13
 ```
 
 ## Gmail drafts with Docker
@@ -389,7 +389,7 @@ The Gmail integration uses the `gmail.compose` OAuth scope and only creates unse
 Then run:
 
 ```bash
-docker compose run --rm outreach gmail-drafts --limit 10
+docker compose run --rm nuntago-cli gmail-drafts --limit 10
 ```
 
 The Compose service uses host networking because Google desktop OAuth starts a temporary localhost callback server. On Linux, copy the authorization URL printed in the terminal into your normal browser if the container cannot open it automatically.
@@ -405,14 +405,14 @@ Approved leads with public email addresses become Gmail drafts. Review and send 
 After sending a draft:
 
 ```bash
-docker compose run --rm outreach mark-sent 12
+docker compose run --rm nuntago-cli mark-sent 12
 ```
 
 Check follow-ups:
 
 ```bash
-docker compose run --rm outreach due-followups
-docker compose run --rm outreach followup-draft 12
+docker compose run --rm nuntago-cli due-followups
+docker compose run --rm nuntago-cli followup-draft 12
 ```
 
 ## Export
@@ -420,7 +420,7 @@ docker compose run --rm outreach followup-draft 12
 Persist exports in `data/`:
 
 ```bash
-docker compose run --rm outreach export --path /data/leads.csv
+docker compose run --rm nuntago-cli export --path /data/leads.csv
 ```
 
 The host file will be available at:
@@ -470,7 +470,7 @@ make help
 A cron job can automate only the safe discovery/drafting stage:
 
 ```cron
-0 8 * * 1-5 cd /path/to/agency-outreach && docker compose run --rm outreach run --limit 15
+0 8 * * 1-5 cd /path/to/nuntago && docker compose run --rm nuntago-cli run --limit 15
 ```
 
 Do not schedule Gmail draft creation or sending unless you intentionally want that behavior.
@@ -508,6 +508,6 @@ Those are good V2 candidates once V1 is producing qualified leads.
 
 ## CI/CD
 
-GitHub Actions validates PactSignal on pull requests and automatically deploys successful `master` commits to Hetzner after the one-time production bootstrap.
+GitHub Actions validates Nuntago on pull requests and automatically deploys successful `master` commits to Hetzner after the one-time production bootstrap.
 
 See [`docs/hetzner-cicd.md`](docs/hetzner-cicd.md) for server layout, required Actions secrets, rollback behavior, and the private-network boundary.

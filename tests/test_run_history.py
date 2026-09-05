@@ -36,10 +36,10 @@ from app.db import (
 @pytest.fixture(autouse=True)
 def restore_settings():
     names = [
-        "pactsignal_demo_mode",
+        "nuntago_demo_mode",
         "db_path",
-        "pactsignal_auth_enabled",
-        "pactsignal_api_token",
+        "nuntago_auth_enabled",
+        "nuntago_api_token",
     ]
     original = {name: getattr(settings, name) for name in names}
     # Ensure no leftover lock from a prior test blocks the next one.
@@ -53,7 +53,7 @@ def restore_settings():
 
 
 def _live_mode(tmp_path: Path) -> Path:
-    object.__setattr__(settings, "pactsignal_demo_mode", False)
+    object.__setattr__(settings, "nuntago_demo_mode", False)
     db_path = tmp_path / "runs.db"
     object.__setattr__(settings, "db_path", db_path)
     return db_path
@@ -339,7 +339,7 @@ def test_get_run_detail_404_for_missing(tmp_path):
 
 
 def test_demo_mode_blocks_process_and_refresh(tmp_path):
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     object.__setattr__(settings, "db_path", tmp_path / "demo.db")
     client = TestClient(api_mod.app)
 
@@ -369,8 +369,8 @@ def test_demo_mode_blocks_process_and_refresh(tmp_path):
 
 def _enable_test_auth() -> str:
     token = "test-token-" + ("x" * 40)
-    object.__setattr__(settings, "pactsignal_auth_enabled", True)
-    object.__setattr__(settings, "pactsignal_api_token", token)
+    object.__setattr__(settings, "nuntago_auth_enabled", True)
+    object.__setattr__(settings, "nuntago_api_token", token)
     return token
 
 
@@ -677,7 +677,7 @@ def test_followups_returns_due_sent_leads(tmp_path):
 
 
 def test_followups_demo_mode_returns_demo_sent_leads():
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     client = TestClient(api_mod.app)
     resp = client.get("/api/followups")
     assert resp.status_code == 200
@@ -2450,7 +2450,7 @@ def test_api_gmail_draft_stale_returns_409(tmp_path, monkeypatch):
 def test_api_regenerate_draft_demo_mode_returns_403(tmp_path, monkeypatch):
     """R1-12: Demo mode blocks regeneration with 403 and does NOT call
     draft_outreach()."""
-    object.__setattr__(settings, "pactsignal_demo_mode", True)
+    object.__setattr__(settings, "nuntago_demo_mode", True)
     db_path = tmp_path / "demo.db"
     object.__setattr__(settings, "db_path", db_path)
     init_db()

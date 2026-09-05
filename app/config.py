@@ -34,14 +34,14 @@ class Settings:
     min_score: int = _int("MIN_SCORE", 70)
     discovery_limit: int = _int("DISCOVERY_LIMIT", 15)
     followup_days: int = _int("FOLLOWUP_DAYS", 4)
-    db_path: Path = Path(os.getenv("DB_PATH", "agency_outreach.db"))
+    db_path: Path = Path(os.getenv("DB_PATH", "nuntago.db"))
     gmail_client_secret: Path = Path(os.getenv("GMAIL_CLIENT_SECRET", "client_secret.json"))
     gmail_token_file: Path = Path(os.getenv("GMAIL_TOKEN_FILE", "token.json"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     log_file: str = os.getenv("LOG_FILE", "").strip()
-    pactsignal_demo_mode: bool = _bool("PACTSIGNAL_DEMO_MODE", False)
-    pactsignal_auth_enabled: bool = _bool("PACTSIGNAL_AUTH_ENABLED", False)
-    pactsignal_api_token: str = os.getenv("PACTSIGNAL_API_TOKEN", "").strip()
+    nuntago_demo_mode: bool = _bool("NUNTAGO_DEMO_MODE", False)
+    nuntago_auth_enabled: bool = _bool("NUNTAGO_AUTH_ENABLED", False)
+    nuntago_api_token: str = os.getenv("NUNTAGO_API_TOKEN", "").strip()
 
 
 settings = Settings()

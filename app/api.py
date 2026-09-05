@@ -53,7 +53,7 @@ from .pipeline import (
 logger = get_logger("api")
 
 app = FastAPI(
-    title="PactSignal Operator API",
+    title="Nuntago Operator API",
     description="Private operator API for partner intelligence and human-approved outreach.",
     version="0.1.0",
 )
@@ -95,7 +95,7 @@ def _startup_reconcile() -> None:
 
 @app.middleware("http")
 async def _operator_auth(request: Request, call_next):
-    if not settings.pactsignal_auth_enabled or request.method == "OPTIONS":
+    if not settings.nuntago_auth_enabled or request.method == "OPTIONS":
         return await call_next(request)
 
     path = request.url.path
@@ -105,7 +105,7 @@ async def _operator_auth(request: Request, call_next):
     if not valid_api_token(request.headers.get("Authorization")):
         return JSONResponse(
             status_code=401,
-            content={"detail": "Valid PactSignal bearer token required"},
+            content={"detail": "Valid Nuntago bearer token required"},
             headers={
                 "Cache-Control": "no-store",
                 "WWW-Authenticate": "Bearer",
@@ -159,16 +159,16 @@ def _live_lead(lead_id: int) -> dict:
 
 
 def _require_live_mode() -> None:
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         raise HTTPException(
             status_code=403,
-            detail="PactSignal demo mode is read-only. External and persistent actions are disabled.",
+            detail="Nuntago demo mode is read-only. External and persistent actions are disabled.",
         )
 
 
 def _run_exclusive(fn):
     if not _RUN_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A PactSignal run is already in progress")
+        raise HTTPException(status_code=409, detail="A Nuntago run is already in progress")
     try:
         return fn()
     finally:
@@ -284,7 +284,7 @@ def _start_background_run(
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
-            detail="A PactSignal run is already in progress",
+            detail="A Nuntago run is already in progress",
         )
     run_id: int | None = None
     try:
@@ -364,26 +364,26 @@ def _start_background_run(
 def health() -> dict:
     return {
         "ok": True,
-        "product": "PactSignal",
-        "demo_mode": settings.pactsignal_demo_mode,
-        "auth_enabled": settings.pactsignal_auth_enabled,
+        "product": "Nuntago",
+        "demo_mode": settings.nuntago_demo_mode,
+        "auth_enabled": settings.nuntago_auth_enabled,
     }
 
 
 @app.get("/api/meta")
 def meta() -> dict:
     return {
-        "product": "PactSignal",
+        "product": "Nuntago",
         "descriptor": "Partner intelligence & outreach",
-        "demo_mode": settings.pactsignal_demo_mode,
+        "demo_mode": settings.nuntago_demo_mode,
         "minimum_score": settings.min_score,
-        "external_actions_enabled": not settings.pactsignal_demo_mode,
+        "external_actions_enabled": not settings.nuntago_demo_mode,
     }
 
 
 @app.get("/api/dashboard")
 def dashboard() -> dict:
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         return demo_dashboard()
 
     init_db()
@@ -445,7 +445,7 @@ def leads(
 ) -> dict:
     query = q.strip().lower()
 
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         items = [dict(lead) for lead in DEMO_LEADS]
         if status:
             items = [lead for lead in items if lead["status"] == status]
@@ -477,7 +477,7 @@ def leads(
 
 @app.get("/api/leads/{lead_id}")
 def lead_detail(lead_id: int) -> dict:
-    return _demo_lead(lead_id) if settings.pactsignal_demo_mode else _live_lead(lead_id)
+    return _demo_lead(lead_id) if settings.nuntago_demo_mode else _live_lead(lead_id)
 
 
 @app.post("/api/leads/{lead_id}/approve")
@@ -695,7 +695,7 @@ def runs(
     discovery run (``?type=discovery&status=completed&limit=1``) so a later
     failed attempt does not hide the last successful ranked result (R2-3).
     """
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         return {"items": [], "total": 0}
     init_db()
     if type and status:
@@ -712,7 +712,7 @@ def runs(
 @app.get("/api/runs/{run_id}")
 def run_detail(run_id: int) -> dict:
     """Return a single persistent run row by id."""
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         raise HTTPException(status_code=404, detail="Run not found")
     init_db()
     row = get_run(run_id)
@@ -724,7 +724,7 @@ def run_detail(run_id: int) -> dict:
 @app.get("/api/followups")
 def followups() -> dict:
     """List sent leads whose follow-up date is due."""
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         # Surface the demo sent leads as due follow-ups for portfolio display.
         items = [
             {
@@ -761,7 +761,7 @@ def followups() -> dict:
 # Vite development, the frontend runs separately and uses the /api proxy.
 _DIST_DIR = Path(
     os.getenv(
-        "PACTSIGNAL_FRONTEND_DIST",
+        "NUNTAGO_FRONTEND_DIST",
         str(Path(__file__).resolve().parents[1] / "frontend" / "dist"),
     )
 )

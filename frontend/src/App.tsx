@@ -44,14 +44,14 @@ function TokenScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
         <div className="auth-brand">
           <div className="brand-mark">P</div>
           <div>
-            <div className="brand-name">PactSignal</div>
+            <div className="brand-name">Nuntago</div>
             <div className="brand-subtitle">Partner intelligence & outreach</div>
           </div>
         </div>
 
         <div className="auth-copy">
           <span className="auth-kicker">Private operator workspace</span>
-          <h1>Unlock PactSignal</h1>
+          <h1>Unlock Nuntago</h1>
           <p>Enter the operator API token for this browser session.</p>
         </div>
 
@@ -87,7 +87,7 @@ function AuthGate({ children }: { children: ReactNode }) {
   }, []);
 
   if (authenticated === null) {
-    return <div className="full-page-message"><strong>PactSignal</strong><span>Checking operator access…</span></div>;
+    return <div className="full-page-message"><strong>Nuntago</strong><span>Checking operator access…</span></div>;
   }
 
   if (!authenticated) {
