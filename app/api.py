@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from typing import Literal
 from fastapi.staticfiles import StaticFiles
 
-from .auth import validate_auth_config, valid_api_token
+from .auth import cloudflare_access_configured, validate_auth_config, valid_operator_request
 from .config import settings
 from .logging_config import get_logger
 from .db import (
@@ -40,7 +40,7 @@ from .db import (
     update_lead,
     update_run,
 )
-from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, demo_dashboard
+from .demo_data import DEMO_LEADS, DEMO_LATEST_RUN, DEMO_RUNS, demo_dashboard
 from .gmail_client import create_draft
 from .pipeline import (
     RegenerationBlocked,
@@ -74,7 +74,8 @@ app.add_middleware(
 _RUN_LOCK = threading.Lock()
 _LATEST_RUN: dict[str, Any] | None = None
 
-_PUBLIC_API_PATHS = {"/api/health"}
+_PUBLIC_API_PATHS = {"/api/health", "/api/site"}
+_PUBLIC_API_PREFIX = "/api/public/"
 
 
 @app.on_event("startup")
@@ -95,21 +96,27 @@ def _startup_reconcile() -> None:
 
 @app.middleware("http")
 async def _operator_auth(request: Request, call_next):
-    if not settings.nuntago_auth_enabled or request.method == "OPTIONS":
+    if request.method == "OPTIONS":
         return await call_next(request)
 
     path = request.url.path
-    if not path.startswith("/api/") or path in _PUBLIC_API_PATHS:
+
+    # Public showcase endpoints are a separate, demo-only API surface. They
+    # never read the live database and never expose mutation routes.
+    if path in _PUBLIC_API_PATHS or path.startswith(_PUBLIC_API_PREFIX):
         return await call_next(request)
 
-    if not valid_api_token(request.headers.get("Authorization")):
+    if not settings.nuntago_auth_enabled or not path.startswith("/api/"):
+        return await call_next(request)
+
+    if not valid_operator_request(
+        request.headers.get("Authorization"),
+        request.headers.get("Cf-Access-Jwt-Assertion"),
+    ):
         return JSONResponse(
             status_code=401,
-            content={"detail": "Valid Nuntago bearer token required"},
-            headers={
-                "Cache-Control": "no-store",
-                "WWW-Authenticate": "Bearer",
-            },
+            content={"detail": "Valid Nuntago operator authentication required"},
+            headers={"Cache-Control": "no-store"},
         )
 
     return await call_next(request)
@@ -370,14 +377,149 @@ def health() -> dict:
     }
 
 
+@app.get("/api/site")
+def site(request: Request) -> dict:
+    """Return presentation mode for the current hostname.
+
+    This endpoint controls frontend UX only. Security does not depend on the
+    Host header: public data lives under /api/public/* and operator /api/*
+    remains independently authenticated.
+    """
+    hostname = (request.url.hostname or "").strip().lower()
+    mode = "public" if hostname == settings.nuntago_public_host else "operator"
+    return {
+        "product": "Nuntago",
+        "mode": mode,
+        "hostname": hostname,
+        "public_host": settings.nuntago_public_host,
+        "operator_host": settings.nuntago_operator_host,
+    }
+
+
+def _public_meta() -> dict:
+    return {
+        "product": "Nuntago",
+        "descriptor": "Partner intelligence & outreach",
+        "mode": "public",
+        "demo_mode": True,
+        "minimum_score": settings.min_score,
+        "external_actions_enabled": False,
+        "auth_method": "none",
+    }
+
+
+def _public_leads(
+    status: str | None,
+    min_score: int,
+    limit: int,
+    q: str,
+) -> dict:
+    query = q.strip().lower()
+    items = [dict(lead) for lead in DEMO_LEADS]
+    if status:
+        items = [lead for lead in items if lead["status"] == status]
+    items = [lead for lead in items if int(lead["score"]) >= min_score]
+    if query:
+        items = [
+            lead for lead in items
+            if query in lead["company"].lower()
+            or query in lead["domain"].lower()
+            or query in (lead.get("proof_project") or "").lower()
+        ]
+    total = len(items)
+    return {"items": [_serialize_lead(item) for item in items[:limit]], "total": total}
+
+
+def _public_runs(
+    limit: int,
+    run_type: Literal["discovery", "processing"] | None,
+    status: Literal["queued", "running", "completed", "failed"] | None,
+) -> dict:
+    rows = [dict(run) for run in DEMO_RUNS]
+    if run_type:
+        rows = [run for run in rows if run["type"] == run_type]
+    if status:
+        rows = [run for run in rows if run["status"] == status]
+    rows = rows[:limit]
+    return {"items": rows, "total": len(rows)}
+
+
+@app.get("/api/public/meta")
+def public_meta() -> dict:
+    return _public_meta()
+
+
+@app.get("/api/public/dashboard")
+def public_dashboard() -> dict:
+    return demo_dashboard()
+
+
+@app.get("/api/public/leads")
+def public_leads(
+    status: str | None = Query(default=None),
+    min_score: int = Query(default=0, ge=0, le=100),
+    limit: int = Query(default=100, ge=1, le=500),
+    q: str = Query(default=""),
+) -> dict:
+    return _public_leads(status, min_score, limit, q)
+
+
+@app.get("/api/public/leads/{lead_id}")
+def public_lead_detail(lead_id: int) -> dict:
+    return _demo_lead(lead_id)
+
+
+@app.get("/api/public/runs")
+def public_runs(
+    limit: int = Query(default=50, ge=1, le=200),
+    type: Literal["discovery", "processing"] | None = Query(default=None),
+    status: Literal["queued", "running", "completed", "failed"] | None = Query(default=None),
+) -> dict:
+    return _public_runs(limit, type, status)
+
+
+@app.get("/api/public/runs/{run_id}")
+def public_run_detail(run_id: int) -> dict:
+    for row in DEMO_RUNS:
+        if int(row["id"]) == run_id:
+            return dict(row)
+    raise HTTPException(status_code=404, detail="Run not found")
+
+
+@app.get("/api/public/followups")
+def public_followups() -> dict:
+    items = [
+        {
+            "id": lead["id"],
+            "company": lead["company"],
+            "domain": lead["domain"],
+            "contact_email": lead.get("contact_email") or "",
+            "status": lead["status"],
+            "last_contact_at": lead.get("last_contact_at"),
+            "followup_due_at": lead.get("followup_due_at"),
+        }
+        for lead in DEMO_LEADS
+        if lead["status"] == "sent"
+    ]
+    return {"items": items, "total": len(items)}
+
+
 @app.get("/api/meta")
 def meta() -> dict:
     return {
         "product": "Nuntago",
         "descriptor": "Partner intelligence & outreach",
+        "mode": "operator",
         "demo_mode": settings.nuntago_demo_mode,
         "minimum_score": settings.min_score,
         "external_actions_enabled": not settings.nuntago_demo_mode,
+        "auth_method": (
+            "cloudflare_access"
+            if cloudflare_access_configured()
+            else "bearer_token"
+            if settings.nuntago_auth_enabled
+            else "disabled"
+        ),
     }
 
 
