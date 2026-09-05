@@ -1,3 +1,11 @@
+export type SiteInfo = {
+  product: string;
+  mode: "public" | "operator";
+  hostname: string;
+  public_host: string;
+  operator_host: string;
+};
+
 export type Lead = {
   id: number;
   company: string;
@@ -150,9 +158,11 @@ export type DashboardData = {
 export type Meta = {
   product: string;
   descriptor: string;
+  mode: "public" | "operator";
   demo_mode: boolean;
   minimum_score: number;
   external_actions_enabled: boolean;
+  auth_method: "none" | "cloudflare_access" | "bearer_token" | "disabled";
 };
 
 export type LeadList = {

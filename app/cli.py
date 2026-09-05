@@ -11,7 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .auth import validate_auth_config
+from .auth import cloudflare_access_configured, validate_auth_config
 from .config import settings
 from .db import (
     SUPPRESSED_STATUSES,
@@ -226,7 +226,11 @@ def doctor_cmd(
         try:
             validate_auth_config()
             auth_ok = True
-            auth_detail = "enabled with static bearer token"
+            auth_detail = (
+                "enabled with Cloudflare Access"
+                if cloudflare_access_configured()
+                else "enabled with bearer-token fallback"
+            )
         except RuntimeError as exc:
             auth_ok = False
             auth_detail = str(exc)
@@ -234,7 +238,7 @@ def doctor_cmd(
 
     checks.append(
         (
-            "Operator API token",
+            "Operator authentication",
             auth_ok,
             auth_detail,
             auth_required,
