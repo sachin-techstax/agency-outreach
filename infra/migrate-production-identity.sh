@@ -10,6 +10,10 @@ fail() {
   exit 1
 }
 
+if [ -L "$APP_ROOT/current" ]; then
+  fail "$APP_ROOT already has an active release; refusing to overwrite staged/live Nuntago state"
+fi
+
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 test -d "$LEGACY_ROOT/shared" || fail "legacy shared state not found: $LEGACY_ROOT/shared"
 test -f "$LEGACY_ROOT/shared/.env" || fail "legacy environment not found: $LEGACY_ROOT/shared/.env"
