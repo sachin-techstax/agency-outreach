@@ -691,7 +691,7 @@ def list_runs_by_status(status: str, limit: int = 50):
 def reconcile_abandoned_runs() -> int:
     """Mark any ``queued`` or ``running`` runs as ``failed``.
 
-    Called on PactSignal startup.  Because background runs execute in daemon
+    Called on Nuntago startup.  Because background runs execute in daemon
     threads inside this process, any persisted ``queued`` or ``running`` row
     found during a fresh startup cannot still have a live worker from the
     previous process.  Marking them ``failed`` prevents stale runs from
@@ -702,7 +702,7 @@ def reconcile_abandoned_runs() -> int:
     """
     init_db()
     stamp = now_iso()
-    reason = "Interrupted by PactSignal process restart"
+    reason = "Interrupted by Nuntago process restart"
     with conn() as db:
         cur = db.execute(
             "UPDATE runs SET status=?, completed_at=?, error_summary=? "

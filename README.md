@@ -1,12 +1,12 @@
-# PactSignal
+# Nuntago
 
 **Partner intelligence & outreach.**
 
-PactSignal is a human-approved partner discovery and outreach platform for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
+Nuntago is a human-approved partner discovery and outreach platform for finding AI consultancies and agencies that may need overflow or white-label AI engineering capacity.
 
-It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. PactSignal intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
+It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. Nuntago intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
 
-The repository name and SQLite filename still use the original `agency-outreach` identifier for migration stability. PactSignal is the product name.
+The repository name, SQLite filename, Docker service/project names, proxy network, and server release path intentionally keep their existing identifiers for migration stability. Nuntago is the product name. The legacy `./pactsignal` CLI alias and `PACTSIGNAL_*` environment variables remain supported during the compatibility window.
 
 ## What it does
 
@@ -30,14 +30,15 @@ The repository name and SQLite filename still use the original `agency-outreach`
 
 Edit `PORTFOLIO` in `app/llm.py` if you want different wording.
 
-# PactSignal CLI
+# Nuntago CLI
 
-The existing pipeline is also available as the PactSignal operator CLI. Existing commands remain compatible, but the CLI is now product-branded and includes runtime inspection helpers.
+The existing pipeline is also available as the Nuntago operator CLI. Existing commands remain compatible, but the CLI is now product-branded and includes runtime inspection helpers.
 
 Local entry points:
 
 ```bash
-./pactsignal --help
+./nuntago --help
+./pactsignal --help  # legacy compatibility alias
 python -m app --help
 ```
 
@@ -51,36 +52,36 @@ Useful operator commands:
 
 ```bash
 # Safe local inspection
-./pactsignal status
-./pactsignal doctor
+./nuntago status
+./nuntago doctor
 
 # Discovery-only ranking, no crawl/LLM/Gmail/DB writes
-./pactsignal discover --limit 20
+./nuntago discover --limit 20
 
 # Full discovery + qualification + outreach drafting
-./pactsignal run --limit 10
+./nuntago run --limit 10
 
 # Human review workflow
-./pactsignal list --status drafted --min-score 70
-./pactsignal show 12
-./pactsignal approve 12
-./pactsignal reject 13
-./pactsignal do-not-contact 14
+./nuntago list --status drafted --min-score 70
+./nuntago show 12
+./nuntago approve 12
+./nuntago reject 13
+./nuntago do-not-contact 14
 
 # Gmail remains draft-only
-./pactsignal gmail-drafts --limit 10
-./pactsignal mark-sent 12
+./nuntago gmail-drafts --limit 10
+./nuntago mark-sent 12
 
 # Start API/UI from the CLI
-./pactsignal serve
-./pactsignal serve --demo --port 8080
+./nuntago serve
+./nuntago serve --demo --port 8080
 ```
 
-`pactsignal doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
+`nuntago doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
 
-The `serve --demo` path forces PactSignal's fictional, read-only portfolio mode. Private mode still requires network-level protection because application authentication has not been added yet.
+The `serve --demo` path forces Nuntago's fictional, read-only portfolio mode. Private mode still requires network-level protection because application authentication has not been added yet.
 
-# PactSignal operator console
+# Nuntago operator console
 
 The React + FastAPI operator console is implemented as a separate web runtime. It uses the same SQLite database and existing pipeline primitives as the CLI.
 
@@ -97,7 +98,7 @@ The current visual direction is a bright, record-first **Twenty × Attio** style
 
 ## Operator workflow
 
-The complete operator workflow is now drivable from the PactSignal UI:
+The complete operator workflow is now drivable from the Nuntago UI:
 
 ```text
 Run discovery
@@ -120,7 +121,7 @@ Run state is persisted in SQLite (`runs` table) so the operator can see history 
 
 ## Contact discovery
 
-PactSignal crawls a company's homepage plus a bounded, deterministically ranked set of same-domain research pages. The page-priority strategy ranks contact pages above service/work/about/AI pages so a normal `/contact` is not displaced by four arbitrary service pages:
+Nuntago crawls a company's homepage plus a bounded, deterministically ranked set of same-domain research pages. The page-priority strategy ranks contact pages above service/work/about/AI pages so a normal `/contact` is not displaced by four arbitrary service pages:
 
 1. `contact`, `contact-us`, `contactus`, `get-in-touch`, `talk-to-us`, `connect` (highest)
 2. `about`, `team`, `who-we-are`, `company`
@@ -132,14 +133,14 @@ Irrelevant paths (`/blog`, `/news`, `/legal`, `/jobs`, etc.) are never crawled. 
 
 Emails are extracted from both visible page text and `mailto:` hrefs. `mailto:hello@example.com?subject=Project` is normalized to `hello@example.com`. Only emails on the company's own domain are accepted; third-party addresses are ignored. Contact provenance is persisted as the actual page URL where the email was found (e.g. `https://launchpadlab.com/contact/`) rather than a generic `website` label.
 
-Contact quality ranking: named/role addresses (`founder@`, `partnerships@`) > generic business addresses (`hello@`, `contact@`, `info@`, `sales@`) > no contact. Inappropriate targets (`privacy@`, `legal@`, `careers@`, `support@`, `noreply@`) are always rejected. PactSignal does not scrape LinkedIn or guess personal email addresses.
+Contact quality ranking: named/role addresses (`founder@`, `partnerships@`) > generic business addresses (`hello@`, `contact@`, `info@`, `sales@`) > no contact. Inappropriate targets (`privacy@`, `legal@`, `careers@`, `support@`, `noreply@`) are always rejected. Nuntago does not scrape LinkedIn or guess personal email addresses.
 
 ## Demo mode
 
 For portfolio/screenshare use, enable:
 
 ```env
-PACTSIGNAL_DEMO_MODE=true
+NUNTAGO_DEMO_MODE=true
 ```
 
 Demo mode serves fictional `.demo` agencies and is intentionally read-only. It blocks:
@@ -150,11 +151,11 @@ Demo mode serves fictional `.demo` agencies and is intentionally read-only. It b
 - sent-state mutation
 - any other persistent/external action exposed by the operator API
 
-This makes it safe to show PactSignal publicly without exposing prospect data or triggering real outreach.
+This makes it safe to show Nuntago publicly without exposing prospect data or triggering real outreach.
 
 ## Run the web UI
 
-Build and start only the PactSignal web service:
+Build and start only the Nuntago web service:
 
 ```bash
 docker compose build pactsignal-web
@@ -178,7 +179,7 @@ curl http://localhost:8080/api/health
 Expected product field:
 
 ```json
-{"ok":true,"product":"PactSignal"}
+{"ok":true,"product":"Nuntago"}
 ```
 
 For frontend-only development:
@@ -195,7 +196,7 @@ npm run dev
 
 Vite runs on `http://localhost:5173` and proxies `/api` to FastAPI on port 8080.
 
-> Private mode currently assumes network-level protection. Do not expose a private-mode PactSignal instance directly to the public internet until authentication is added. Demo mode is the safe public/portfolio mode.
+> Private mode currently assumes network-level protection. Do not expose a private-mode Nuntago instance directly to the public internet until authentication is added. Demo mode is the safe public/portfolio mode.
 
 # Docker quick start
 
@@ -508,6 +509,6 @@ Those are good V2 candidates once V1 is producing qualified leads.
 
 ## CI/CD
 
-GitHub Actions validates PactSignal on pull requests and automatically deploys successful `master` commits to Hetzner after the one-time production bootstrap.
+GitHub Actions validates Nuntago on pull requests and automatically deploys successful `master` commits to Hetzner after the one-time production bootstrap.
 
 See [`docs/hetzner-cicd.md`](docs/hetzner-cicd.md) for server layout, required Actions secrets, rollback behavior, and the private-network boundary.

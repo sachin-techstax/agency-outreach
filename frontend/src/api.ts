@@ -11,18 +11,21 @@ import type {
   RunRow
 } from "./types";
 
-const TOKEN_KEY = "pactsignal_api_token";
+const TOKEN_KEY = "nuntago_api_token";
+const LEGACY_TOKEN_KEY = "pactsignal_api_token";
 
 export function getAccessToken(): string {
-  return sessionStorage.getItem(TOKEN_KEY) ?? "";
+  return sessionStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(LEGACY_TOKEN_KEY) ?? "";
 }
 
 export function setAccessToken(token: string): void {
   sessionStorage.setItem(TOKEN_KEY, token.trim());
+  sessionStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
 export function clearAccessToken(): void {
   sessionStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(LEGACY_TOKEN_KEY);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

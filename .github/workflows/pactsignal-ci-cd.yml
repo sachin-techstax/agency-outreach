@@ -1,4 +1,4 @@
-name: PactSignal CI/CD
+name: Nuntago CI/CD
 
 on:
   pull_request:
@@ -55,7 +55,7 @@ jobs:
           set -Eeuo pipefail
           docker compose run --rm --entrypoint pytest outreach -q
 
-      - name: Smoke-test PactSignal demo runtime
+      - name: Smoke-test Nuntago demo runtime
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -76,7 +76,7 @@ jobs:
           done
 
           echo "$body"
-          echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"PactSignal"'
+          echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"Nuntago"'
           echo "$body" | grep -Eq '"demo_mode"[[:space:]]*:[[:space:]]*true'
 
           status="$(curl -sS -o /tmp/demo-block.json -w '%{http_code}' \

@@ -1,6 +1,6 @@
-# PactSignal CI/CD — GitHub Actions to Hetzner
+# Nuntago CI/CD — GitHub Actions to Hetzner
 
-PactSignal uses one GitHub Actions workflow for validation and deployment.
+Nuntago uses one GitHub Actions workflow for validation and deployment.
 
 ## Behavior
 
@@ -11,8 +11,8 @@ Every pull request:
 1. builds the CLI Docker image;
 2. builds the React/FastAPI web Docker image;
 3. runs the full pytest suite;
-4. starts PactSignal in read-only demo mode;
-5. verifies `/api/health` returns PactSignal with `demo_mode=true`;
+4. starts Nuntago in read-only demo mode;
+5. verifies `/api/health` returns Nuntago with `demo_mode=true`;
 6. verifies a mutation endpoint is blocked with HTTP 403.
 
 No deployment occurs for pull requests.
@@ -31,8 +31,8 @@ The deploy job:
    - `/srv/agency-outreach/shared/data`
    - `/srv/agency-outreach/shared/secrets`
 5. builds SHA-tagged Docker images;
-6. runs `pactsignal doctor --strict`;
-7. starts the private PactSignal web runtime;
+6. runs `nuntago doctor --strict`;
+7. starts the private Nuntago web runtime;
 8. checks `http://127.0.0.1:8080/api/health`;
 9. switches `/srv/agency-outreach/current` only after the new release is healthy;
 10. rolls back to the previous release if the new runtime fails its health check.
@@ -90,12 +90,12 @@ YOUR_NAME="Sachin Rajan"
 MIN_SCORE=70
 DISCOVERY_LIMIT=15
 FOLLOWUP_DAYS=4
-PACTSIGNAL_DEMO_MODE=false
+NUNTAGO_DEMO_MODE=false
 ```
 
 OpenAI is optional for the existing deterministic fallback, but the production `doctor --strict` requires Serper because discovery cannot operate without it.
 
-> Do not validate the file by sourcing it directly in Bash. Values may legitimately contain spaces. Docker Compose reads the env file directly; use `pactsignal doctor` or a non-evaluating parser/check instead.
+> Do not validate the file by sourcing it directly in Bash. Values may legitimately contain spaces. Docker Compose reads the env file directly; use `nuntago doctor` or a non-evaluating parser/check instead.
 
 When Gmail drafting is enabled, copy the OAuth files to:
 
@@ -143,7 +143,7 @@ curl -fsS http://127.0.0.1:8080/api/health
 
 ## Network boundary
 
-The Compose service publishes PactSignal only on:
+The Compose service publishes Nuntago only on:
 
 ```text
 127.0.0.1:8080
@@ -151,7 +151,7 @@ The Compose service publishes PactSignal only on:
 
 Private mode currently has no application authentication. Do not change that binding to `0.0.0.0` merely to make the UI reachable.
 
-For remote browser access, put an authenticated reverse proxy or private network such as Tailscale in front of PactSignal.
+For remote browser access, put an authenticated reverse proxy or private network such as Tailscale in front of Nuntago.
 
 ## Rollback
 
@@ -164,7 +164,7 @@ cd /srv/agency-outreach/releases/<previous-sha>
 export DEPLOY_SHA=<first-12-chars-of-previous-sha>
 export LOCAL_UID="$(id -u)"
 export LOCAL_GID="$(id -g)"
-export PACTSIGNAL_DEMO_MODE=false
+export NUNTAGO_DEMO_MODE=false
 
 docker compose -p pactsignal up -d pactsignal-web
 ln -sfn /srv/agency-outreach/releases/<previous-sha> /srv/agency-outreach/current
@@ -176,7 +176,7 @@ This milestone deploys application code and the private web operator console.
 
 It does **not** yet:
 
-- expose PactSignal publicly;
+- expose Nuntago publicly;
 - configure DNS/TLS;
 - create an application login;
 - schedule recurring discovery/outreach runs;

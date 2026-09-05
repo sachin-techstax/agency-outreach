@@ -44,7 +44,7 @@ fi
 
 cat <<EOF
 
-PactSignal server directories are ready.
+Nuntago server directories are ready.
 
 Next:
 1. Edit:

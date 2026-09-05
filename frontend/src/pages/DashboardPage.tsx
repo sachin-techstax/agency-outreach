@@ -79,7 +79,7 @@ export function DashboardPage() {
       </header>
 
       <section className="page-body">
-        {dashboard.isLoading && <div className="loading-line">Loading PactSignal…</div>}
+        {dashboard.isLoading && <div className="loading-line">Loading Nuntago…</div>}
         {runError && <div className="error-banner">{runError}</div>}
         {runRow && <ActiveRunBanner run={runRow} />}
 
@@ -130,7 +130,7 @@ export function DashboardPage() {
                     <RunStage label="Attempted" value={run.attempted} max={run.raw_candidate_domains} tone="amber" />
                     <RunStage label="Qualified" value={run.qualified} max={run.raw_candidate_domains} tone="green" />
                   </div>
-                ) : <EmptyState>Run discovery from PactSignal to populate this panel.</EmptyState>}
+                ) : <EmptyState>Run discovery from Nuntago to populate this panel.</EmptyState>}
                 <div className="insight-box">
                   <span>Pipeline signal</span>
                   <p>{run?.qualified != null && run?.attempted ? `${run.qualified} of ${run.attempted} attempted prospects passed commercial-fit qualification.` : "Commercial-fit signals appear here after an outreach run."}</p>

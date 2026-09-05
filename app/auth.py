@@ -9,7 +9,7 @@ def validate_auth_config() -> None:
     if not settings.pactsignal_auth_enabled:
         return
     if len(settings.pactsignal_api_token) < 32:
-        raise RuntimeError("PACTSIGNAL_API_TOKEN must contain at least 32 characters")
+        raise RuntimeError("NUNTAGO_API_TOKEN (or legacy PACTSIGNAL_API_TOKEN) must contain at least 32 characters")
 
 
 def bearer_token_from_header(authorization: str | None) -> str:

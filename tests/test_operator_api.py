@@ -114,7 +114,7 @@ def test_health_reports_product_name():
     client = TestClient(api_mod.app)
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json()["product"] == "PactSignal"
+    assert response.json()["product"] == "Nuntago"
 
 
 def test_private_leads_initializes_fresh_database(tmp_path: Path):
@@ -143,7 +143,7 @@ def test_demo_leads_total_is_before_limit():
 def test_spa_path_containment_rejects_parent_escape(tmp_path: Path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir()
-    (dist / "index.html").write_text("<html>PactSignal</html>", encoding="utf-8")
+    (dist / "index.html").write_text("<html>Nuntago</html>", encoding="utf-8")
     outside = tmp_path / "secret.txt"
     outside.write_text("must-not-leak", encoding="utf-8")
 
@@ -173,7 +173,7 @@ def test_auth_enabled_keeps_health_public_but_protects_operator_api():
 
     dashboard = client.get("/api/dashboard")
     assert dashboard.status_code == 401
-    assert dashboard.json()["detail"] == "Valid PactSignal bearer token required"
+    assert dashboard.json()["detail"] == "Valid Nuntago bearer token required"
     assert dashboard.headers["www-authenticate"] == "Bearer"
 
 

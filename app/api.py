@@ -53,7 +53,7 @@ from .pipeline import (
 logger = get_logger("api")
 
 app = FastAPI(
-    title="PactSignal Operator API",
+    title="Nuntago Operator API",
     description="Private operator API for partner intelligence and human-approved outreach.",
     version="0.1.0",
 )
@@ -105,7 +105,7 @@ async def _operator_auth(request: Request, call_next):
     if not valid_api_token(request.headers.get("Authorization")):
         return JSONResponse(
             status_code=401,
-            content={"detail": "Valid PactSignal bearer token required"},
+            content={"detail": "Valid Nuntago bearer token required"},
             headers={
                 "Cache-Control": "no-store",
                 "WWW-Authenticate": "Bearer",
@@ -162,13 +162,13 @@ def _require_live_mode() -> None:
     if settings.pactsignal_demo_mode:
         raise HTTPException(
             status_code=403,
-            detail="PactSignal demo mode is read-only. External and persistent actions are disabled.",
+            detail="Nuntago demo mode is read-only. External and persistent actions are disabled.",
         )
 
 
 def _run_exclusive(fn):
     if not _RUN_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="A PactSignal run is already in progress")
+        raise HTTPException(status_code=409, detail="A Nuntago run is already in progress")
     try:
         return fn()
     finally:
@@ -284,7 +284,7 @@ def _start_background_run(
     if not _RUN_LOCK.acquire(blocking=False):
         raise HTTPException(
             status_code=409,
-            detail="A PactSignal run is already in progress",
+            detail="A Nuntago run is already in progress",
         )
     run_id: int | None = None
     try:
@@ -364,7 +364,7 @@ def _start_background_run(
 def health() -> dict:
     return {
         "ok": True,
-        "product": "PactSignal",
+        "product": "Nuntago",
         "demo_mode": settings.pactsignal_demo_mode,
         "auth_enabled": settings.pactsignal_auth_enabled,
     }
@@ -373,7 +373,7 @@ def health() -> dict:
 @app.get("/api/meta")
 def meta() -> dict:
     return {
-        "product": "PactSignal",
+        "product": "Nuntago",
         "descriptor": "Partner intelligence & outreach",
         "demo_mode": settings.pactsignal_demo_mode,
         "minimum_score": settings.min_score,

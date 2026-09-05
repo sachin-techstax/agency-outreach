@@ -10,7 +10,7 @@ PROJECT_NAME="pactsignal"
 HEALTH_URL="http://127.0.0.1:8080/api/health"
 
 fail() {
-  echo "PactSignal deploy failed: $*" >&2
+  echo "Nuntago deploy failed: $*" >&2
   exit 1
 }
 
@@ -44,20 +44,20 @@ export PACTSIGNAL_DEMO_MODE=false
 
 cd "$RELEASE_DIR"
 
-echo "==> Building PactSignal release $RELEASE_SHA"
+echo "==> Building Nuntago release $RELEASE_SHA"
 docker compose -p "$PROJECT_NAME" build outreach pactsignal-web
 
 echo "==> Checking production prerequisites"
 docker compose -p "$PROJECT_NAME" run --rm outreach doctor --strict
 
-echo "==> Starting PactSignal web runtime"
+echo "==> Starting Nuntago web runtime"
 docker compose -p "$PROJECT_NAME" up -d pactsignal-web
 
 healthy=false
 body=""
 for attempt in $(seq 1 30); do
   if body="$(curl -fsS "$HEALTH_URL" 2>/dev/null)"; then
-    if echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"PactSignal"' &&
+    if echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"Nuntago"' &&
        echo "$body" | grep -Eq '"demo_mode"[[:space:]]*:[[:space:]]*false'; then
       healthy=true
       break
@@ -78,7 +78,7 @@ if [ "$healthy" != "true" ]; then
     rollback_ok=false
     for attempt in $(seq 1 20); do
       if body="$(curl -fsS "$HEALTH_URL" 2>/dev/null)" &&
-         echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"PactSignal"'; then
+         echo "$body" | grep -Eq '"product"[[:space:]]*:[[:space:]]*"Nuntago"'; then
         rollback_ok=true
         break
       fi
@@ -95,7 +95,7 @@ fi
 
 ln -sfn "$RELEASE_DIR" "$CURRENT_LINK"
 
-echo "==> PactSignal release active: $RELEASE_SHA"
+echo "==> Nuntago release active: $RELEASE_SHA"
 echo "$body"
 
 # Keep the newest five source releases. Container images are intentionally not

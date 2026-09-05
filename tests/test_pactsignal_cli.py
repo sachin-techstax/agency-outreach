@@ -31,11 +31,11 @@ def restore_settings():
         os.environ["PACTSIGNAL_DEMO_MODE"] = original_demo_env
 
 
-def test_help_is_branded_pactsignal():
+def test_help_is_branded_nuntago():
     result = runner.invoke(cli_mod.app, ["--help"])
 
     assert result.exit_code == 0
-    assert "PactSignal" in result.stdout
+    assert "Nuntago" in result.stdout
     assert "Agency Outreach" not in result.stdout
 
 
@@ -43,7 +43,7 @@ def test_version_command():
     result = runner.invoke(cli_mod.app, ["version"])
 
     assert result.exit_code == 0
-    assert "PactSignal 0.1.0" in result.stdout
+    assert "Nuntago 0.1.0" in result.stdout
 
 
 def test_status_initializes_fresh_database(tmp_path: Path):
@@ -52,7 +52,7 @@ def test_status_initializes_fresh_database(tmp_path: Path):
     result = runner.invoke(cli_mod.app, ["status"])
 
     assert result.exit_code == 0
-    assert "PactSignal" in result.stdout
+    assert "Nuntago" in result.stdout
     assert "Total leads" in result.stdout
     assert (tmp_path / "status.db").exists()
 
@@ -91,7 +91,7 @@ def test_doctor_never_prints_secret_values(tmp_path: Path):
     assert result.exit_code == 0
     assert "super-secret-serper-value" not in result.stdout
     assert "super-secret-openai-value" not in result.stdout
-    assert "PactSignal doctor" in result.stdout
+    assert "Nuntago doctor" in result.stdout
 
 
 def test_doctor_strict_fails_without_serper(tmp_path: Path):
@@ -110,7 +110,7 @@ def test_demo_mode_blocks_gmail_cli_action(tmp_path: Path):
     result = runner.invoke(cli_mod.app, ["gmail-drafts"])
 
     assert result.exit_code != 0
-    assert "disabled in PactSignal demo mode" in result.stdout
+    assert "disabled in Nuntago demo mode" in result.stdout
 
 
 def test_serve_demo_sets_read_only_mode(monkeypatch):
@@ -157,4 +157,4 @@ def test_demo_mode_blocks_risky_cli_commands(command):
     result = runner.invoke(cli_mod.app, command)
 
     assert result.exit_code != 0
-    assert "disabled in PactSignal demo mode" in result.stdout
+    assert "disabled in Nuntago demo mode" in result.stdout

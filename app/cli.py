@@ -27,14 +27,14 @@ from .llm import draft_followup
 from .logging_config import configure_logging, get_logger
 from .pipeline import discover_only, run as run_pipeline
 
-PRODUCT_NAME = "PactSignal"
+PRODUCT_NAME = "Nuntago"
 PRODUCT_DESCRIPTOR = "Partner intelligence & outreach"
 VERSION = "0.1.0"
 
 app = typer.Typer(
-    name="pactsignal",
+    name="nuntago",
     help=(
-        "PactSignal — partner intelligence and human-approved outreach. "
+        "Nuntago — partner intelligence and human-approved outreach. "
         "Discover, qualify, review and manage agency prospects from the terminal."
     ),
     no_args_is_help=True,
@@ -80,7 +80,7 @@ def _require_private_mode(action: str) -> None:
         # Print a stable operator-facing reason before exiting so terminal users
         # and CliRunner/automation receive the same message on stdout.
         console.print(
-            f"[red]Blocked:[/red] {action} is disabled in PactSignal demo mode."
+            f"[red]Blocked:[/red] {action} is disabled in Nuntago demo mode."
         )
         raise typer.Exit(code=2)
 
@@ -109,7 +109,7 @@ def print_leads(rows) -> None:
 
 @app.command("version")
 def version_cmd() -> None:
-    """Print the PactSignal CLI version."""
+    """Print the Nuntago CLI version."""
     console.print(f"{PRODUCT_NAME} {VERSION}")
 
 
@@ -173,7 +173,7 @@ def doctor_cmd(
         help="Exit non-zero when discovery prerequisites are missing.",
     ),
 ) -> None:
-    """Check PactSignal runtime readiness without making external API calls."""
+    """Check Nuntago runtime readiness without making external API calls."""
     checks: list[tuple[str, bool, str, bool]] = []
 
     try:
@@ -220,7 +220,7 @@ def doctor_cmd(
         auth_required = False
     elif not settings.pactsignal_auth_enabled:
         auth_ok = False
-        auth_detail = "PACTSIGNAL_AUTH_ENABLED is false"
+        auth_detail = "NUNTAGO_AUTH_ENABLED is false (legacy PACTSIGNAL_AUTH_ENABLED is also supported)"
         auth_required = True
     else:
         try:
@@ -267,19 +267,19 @@ def doctor_cmd(
     if required_failures:
         console.print()
         console.print(
-            "[yellow]PactSignal can still inspect stored leads, but discovery is not ready.[/yellow]"
+            "[yellow]Nuntago can still inspect stored leads, but discovery is not ready.[/yellow]"
         )
         if strict:
             raise typer.Exit(code=1)
     else:
         console.print()
-        console.print("[green]PactSignal is ready for discovery.[/green]")
+        console.print("[green]Nuntago is ready for discovery.[/green]")
 
 
 @app.command("serve")
 def serve_cmd(
     host: str = typer.Option("127.0.0.1", help="Host interface for the operator API/UI."),
-    port: int = typer.Option(8080, min=1, max=65535, help="Port for PactSignal."),
+    port: int = typer.Option(8080, min=1, max=65535, help="Port for Nuntago."),
     demo: bool = typer.Option(
         False,
         "--demo",
@@ -291,8 +291,9 @@ def serve_cmd(
         help="Enable Uvicorn auto-reload for local development.",
     ),
 ) -> None:
-    """Serve the PactSignal FastAPI operator API and compiled React UI."""
+    """Serve the Nuntago FastAPI operator API and compiled React UI."""
     if demo:
+        os.environ["NUNTAGO_DEMO_MODE"] = "true"
         os.environ["PACTSIGNAL_DEMO_MODE"] = "true"
         object.__setattr__(settings, "pactsignal_demo_mode", True)
 
@@ -330,9 +331,9 @@ def serve_cmd(
 
 @app.command("init-db")
 def init_db_cmd() -> None:
-    """Initialize or migrate the PactSignal SQLite database."""
+    """Initialize or migrate the Nuntago SQLite database."""
     init_db()
-    console.print(f"PactSignal database ready: {settings.db_path}")
+    console.print(f"Nuntago database ready: {settings.db_path}")
 
 
 @app.command("run")
