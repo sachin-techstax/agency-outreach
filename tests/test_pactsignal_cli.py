@@ -20,6 +20,7 @@ def restore_settings():
     original_serper = settings.serper_api_key
     original_openai = settings.openai_api_key
     original_demo_env = os.environ.get("PACTSIGNAL_DEMO_MODE")
+    original_nuntago_demo_env = os.environ.get("NUNTAGO_DEMO_MODE")
     yield
     object.__setattr__(settings, "db_path", original_db)
     object.__setattr__(settings, "pactsignal_demo_mode", original_demo)
@@ -29,6 +30,10 @@ def restore_settings():
         os.environ.pop("PACTSIGNAL_DEMO_MODE", None)
     else:
         os.environ["PACTSIGNAL_DEMO_MODE"] = original_demo_env
+    if original_nuntago_demo_env is None:
+        os.environ.pop("NUNTAGO_DEMO_MODE", None)
+    else:
+        os.environ["NUNTAGO_DEMO_MODE"] = original_nuntago_demo_env
 
 
 def test_help_is_branded_nuntago():
@@ -132,6 +137,8 @@ def test_serve_demo_sets_read_only_mode(monkeypatch):
 
     assert result.exit_code == 0
     assert settings.pactsignal_demo_mode is True
+    assert os.environ["NUNTAGO_DEMO_MODE"] == "true"
+    assert os.environ["PACTSIGNAL_DEMO_MODE"] == "true"
     assert calls["app"] == "app.api:app"
     assert calls["host"] == "127.0.0.1"
     assert calls["port"] == 9090
