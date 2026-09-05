@@ -17,6 +17,11 @@ def restore_settings():
         "db_path",
         "nuntago_auth_enabled",
         "nuntago_api_token",
+        "nuntago_public_host",
+        "nuntago_operator_host",
+        "nuntago_access_team_domain",
+        "nuntago_access_aud",
+        "nuntago_operator_email",
     ]
     original = {name: getattr(settings, name) for name in names}
     yield
@@ -173,8 +178,8 @@ def test_auth_enabled_keeps_health_public_but_protects_operator_api():
 
     dashboard = client.get("/api/dashboard")
     assert dashboard.status_code == 401
-    assert dashboard.json()["detail"] == "Valid Nuntago bearer token required"
-    assert dashboard.headers["www-authenticate"] == "Bearer"
+    assert dashboard.json()["detail"] == "Valid Nuntago operator authentication required"
+    assert "www-authenticate" not in dashboard.headers
 
 
 def test_valid_bearer_token_unlocks_operator_api():
@@ -209,3 +214,76 @@ def test_invalid_or_missing_api_token_is_rejected(authorization: str | None):
     response = client.get("/api/meta", headers=headers)
 
     assert response.status_code == 401
+
+def test_site_mode_uses_public_hostname_only_for_presentation():
+    client = TestClient(api_mod.app)
+
+    public = client.get(
+        "/api/site",
+        headers={"host": settings.nuntago_public_host},
+    )
+    assert public.status_code == 200
+    assert public.json()["mode"] == "public"
+
+    operator = client.get(
+        "/api/site",
+        headers={"host": settings.nuntago_operator_host},
+    )
+    assert operator.status_code == 200
+    assert operator.json()["mode"] == "operator"
+
+
+def test_public_showcase_is_demo_only_even_when_operator_auth_is_enabled(tmp_path: Path):
+    _enable_test_auth()
+    object.__setattr__(settings, "nuntago_demo_mode", False)
+    object.__setattr__(settings, "db_path", tmp_path / "private.db")
+
+    upsert_lead({
+        "company": "Private Real Lead",
+        "domain": "private-real.example",
+        "website": "https://private-real.example",
+        "score": 99,
+        "status": "drafted",
+    })
+
+    client = TestClient(api_mod.app)
+
+    dashboard = client.get("/api/public/dashboard")
+    assert dashboard.status_code == 200
+    assert dashboard.json()["mode"] == "demo"
+
+    leads = client.get("/api/public/leads")
+    assert leads.status_code == 200
+    domains = {row["domain"] for row in leads.json()["items"]}
+    assert "private-real.example" not in domains
+    assert "northstar-ai.demo" in domains
+
+    discovery = client.get(
+        "/api/public/runs?type=discovery&status=completed&limit=1"
+    )
+    assert discovery.status_code == 200
+    assert discovery.json()["items"][0]["result"]["type"] == "discovery"
+
+    mutation = client.post("/api/public/leads/1/approve")
+    assert mutation.status_code in {404, 405}
+
+
+def test_cloudflare_access_assertion_can_unlock_operator_api(monkeypatch):
+    _enable_test_auth()
+    object.__setattr__(settings, "nuntago_demo_mode", True)
+
+    monkeypatch.setattr(
+        api_mod,
+        "valid_operator_request",
+        lambda authorization, assertion: assertion == "verified-access-jwt",
+    )
+
+    client = TestClient(api_mod.app)
+    response = client.get(
+        "/api/meta",
+        headers={"Cf-Access-Jwt-Assertion": "verified-access-jwt"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "operator"
+
