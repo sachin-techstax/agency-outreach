@@ -98,6 +98,6 @@ curl -fsS http://127.0.0.1:8080/api/health
 
 ## Gradewise separation
 
-Gradewise must not route a Nuntago hostname and its Caddy container must not join any Nuntago/PactSignal network. The Gradewise detachment is maintained in its own repository and PR.
+Gradewise must not route a Nuntago hostname and its Caddy container must not join any external Nuntago product network. The Gradewise detachment is maintained in its own repository and PR.
 
 Until an umbrella domain is chosen and configured, Nuntago remains private on `127.0.0.1:8080`.
