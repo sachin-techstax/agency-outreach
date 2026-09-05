@@ -4,7 +4,7 @@ Nuntago exposes two browser surfaces from the same localhost-bound runtime while
 keeping their API boundaries separate.
 
 ```text
-demo.nuntago.ergorum.com
+nuntago-demo.ergorum.com
   -> public browser showcase
   -> /api/public/*
   -> fictional demo data only
@@ -32,7 +32,7 @@ Production configuration:
 ```dotenv
 NUNTAGO_AUTH_ENABLED=true
 
-NUNTAGO_PUBLIC_HOST=demo.nuntago.ergorum.com
+NUNTAGO_PUBLIC_HOST=nuntago-demo.ergorum.com
 NUNTAGO_OPERATOR_HOST=nuntago.ergorum.com
 
 NUNTAGO_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com
