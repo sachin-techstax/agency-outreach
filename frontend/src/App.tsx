@@ -1,7 +1,7 @@
-import { FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api";
+import { api, setApiMode } from "./api";
 import { Shell } from "./components/Shell";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DiscoveryPage } from "./pages/DiscoveryPage";
@@ -16,97 +16,62 @@ const client = new QueryClient({
   }
 });
 
-function TokenScreen({ onAuthenticated }: { onAuthenticated: () => void }) {
-  const [token, setToken] = useState("");
+function BootstrapGate({ children }: { children: ReactNode }) {
+  const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setSubmitting(true);
-    setError("");
-    setAccessToken(token);
-    try {
-      await api.meta();
-      client.clear();
-      onAuthenticated();
-    } catch (err) {
-      clearAccessToken();
-      setError(err instanceof Error ? err.message : "Access denied");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div className="auth-screen">
-      <div className="auth-card">
-        <div className="auth-brand">
-          <div className="brand-mark">P</div>
-          <div>
-            <div className="brand-name">Nuntago</div>
-            <div className="brand-subtitle">Partner intelligence & outreach</div>
-          </div>
-        </div>
-
-        <div className="auth-copy">
-          <span className="auth-kicker">Private operator workspace</span>
-          <h1>Unlock Nuntago</h1>
-          <p>Enter the operator API token for this browser session.</p>
-        </div>
-
-        <form className="auth-form" onSubmit={submit}>
-          <label>
-            <span>Access token</span>
-            <input
-              autoComplete="off"
-              type="password"
-              value={token}
-              onChange={(event) => setToken(event.target.value)}
-              required
-              autoFocus
-            />
-          </label>
-          {error ? <div className="error-banner compact">{error}</div> : null}
-          <button className="button primary auth-submit" disabled={submitting} type="submit">
-            {submitting ? "Checking…" : "Unlock"}
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function AuthGate({ children }: { children: ReactNode }) {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
 
   useEffect(() => {
-    api.meta()
-      .then(() => setAuthenticated(true))
-      .catch(() => setAuthenticated(false));
+    let cancelled = false;
+
+    api.site()
+      .then((site) => {
+        setApiMode(site.mode);
+        client.clear();
+        return api.meta();
+      })
+      .then(() => {
+        if (!cancelled) setReady(true);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Nuntago access check failed");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  if (authenticated === null) {
-    return <div className="full-page-message"><strong>Nuntago</strong><span>Checking operator access…</span></div>;
+  if (error) {
+    return (
+      <div className="full-page-message error">
+        <strong>Nuntago</strong>
+        <span>{error}</span>
+        <small>
+          The public showcase is available at nuntago.ergorum.com. Operator access
+          requires the protected console.
+        </small>
+      </div>
+    );
   }
 
-  if (!authenticated) {
-    return <TokenScreen onAuthenticated={() => setAuthenticated(true)} />;
+  if (!ready) {
+    return (
+      <div className="full-page-message">
+        <strong>Nuntago</strong>
+        <span>Opening workspace…</span>
+      </div>
+    );
   }
 
   return <>{children}</>;
 }
 
-export function signOutOperator(): void {
-  clearAccessToken();
-  client.clear();
-  window.location.assign("/");
-}
-
 export default function App() {
   return (
     <QueryClientProvider client={client}>
-      <AuthGate>
+      <BootstrapGate>
         <BrowserRouter>
           <Routes>
             <Route element={<Shell />}>
@@ -120,7 +85,7 @@ export default function App() {
             </Route>
           </Routes>
         </BrowserRouter>
-      </AuthGate>
+      </BootstrapGate>
     </QueryClientProvider>
   );
 }
