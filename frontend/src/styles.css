@@ -219,3 +219,35 @@ select { height:34px; border:1px solid var(--line); border-radius:8px; padding:0
 .followup-columns { grid-template-columns: minmax(230px,1.6fr) minmax(160px,1fr) 110px 80px 80px; }
 .progress-json { background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:10px; font-size:9px; color:var(--sub); white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
 .preview-foot { margin:8px 0 0; }
+
+.showcase-banner {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 7px 18px;
+  border-bottom: 1px solid #e9e6fb;
+  background: #faf9fe;
+  color: var(--sub);
+  font-size: 9px;
+  line-height: 14px;
+}
+.showcase-banner strong { color: var(--violet); }
+.sidebar-console-link {
+  margin-top: 9px;
+  width: max-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--violet);
+  font-size: 9px;
+  text-decoration: none;
+}
+.sidebar-console-link:hover { text-decoration: underline; }
+.full-page-message small {
+  max-width: 420px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 15px;
+}
