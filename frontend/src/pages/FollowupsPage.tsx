@@ -48,7 +48,7 @@ export function FollowupsPage() {
 
         <div className="insight-box">
           <span>Manual boundary</span>
-          <p>Follow-up drafting is a deliberate operator action. Nuntago does not automatically send follow-up emails. Use the CLI <code>pactsignal followup-draft &lt;id&gt;</code> to generate a draft, then send it manually.</p>
+          <p>Follow-up drafting is a deliberate operator action. Nuntago does not automatically send follow-up emails. Use the CLI <code>nuntago followup-draft &lt;id&gt;</code> to generate a draft, then send it manually.</p>
         </div>
       </section>
     </>
