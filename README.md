@@ -78,7 +78,7 @@ Useful operator commands:
 
 `nuntago doctor --strict` exits non-zero when required discovery prerequisites are missing, which is useful for shell scripts and deployment checks. It reports only configuration presence and never prints API keys or OAuth tokens.
 
-The `serve --demo` path still forces Nuntago's fictional, read-only local portfolio mode. Production now separates the public showcase (`nuntago.ergorum.com`) from the private operator console (`console.nuntago.ergorum.com`). The public browser uses the isolated `/api/public/*` demo API, while the operator API accepts validated Cloudflare Access identity (with a bearer-token fallback for tooling).
+The `serve --demo` path still forces Nuntago's fictional, read-only local portfolio mode. Production now separates the public showcase (`demo.nuntago.ergorum.com`) from the private operator workspace (`nuntago.ergorum.com`). The public browser uses the isolated `/api/public/*` demo API, while the operator API accepts validated Cloudflare Access identity (with a bearer-token fallback for tooling).
 
 # Nuntago operator console
 
@@ -195,7 +195,7 @@ npm run dev
 
 Vite runs on `http://localhost:5173` and proxies `/api` to FastAPI on port 8080.
 
-> Production browser access uses two surfaces: `nuntago.ergorum.com` is a read-only fictional showcase backed only by `/api/public/*`; `console.nuntago.ergorum.com` is the live operator workspace and should remain behind Cloudflare Access. The origin remains localhost-bound behind Cloudflare Tunnel.
+> Production browser access uses two surfaces: `demo.nuntago.ergorum.com` is a read-only fictional showcase backed only by `/api/public/*`; `nuntago.ergorum.com` is the live operator workspace and should remain behind Cloudflare Access. The origin remains localhost-bound behind Cloudflare Tunnel.
 
 # Docker quick start
 
