@@ -42,6 +42,19 @@ class Settings:
     nuntago_demo_mode: bool = _bool("NUNTAGO_DEMO_MODE", False)
     nuntago_auth_enabled: bool = _bool("NUNTAGO_AUTH_ENABLED", False)
     nuntago_api_token: str = os.getenv("NUNTAGO_API_TOKEN", "").strip()
+    nuntago_public_host: str = os.getenv(
+        "NUNTAGO_PUBLIC_HOST", "nuntago.ergorum.com"
+    ).strip().lower()
+    nuntago_operator_host: str = os.getenv(
+        "NUNTAGO_OPERATOR_HOST", "console.nuntago.ergorum.com"
+    ).strip().lower()
+    nuntago_access_team_domain: str = os.getenv(
+        "NUNTAGO_ACCESS_TEAM_DOMAIN", ""
+    ).strip().rstrip("/")
+    nuntago_access_aud: str = os.getenv("NUNTAGO_ACCESS_AUD", "").strip()
+    nuntago_operator_email: str = os.getenv(
+        "NUNTAGO_OPERATOR_EMAIL", ""
+    ).strip().lower()
 
 
 settings = Settings()
