@@ -8,33 +8,39 @@ import type {
   RefreshResult,
   RegenerateResult,
   RunList,
-  RunRow
+  RunRow,
+  SiteInfo
 } from "./types";
 
-const TOKEN_KEY = "nuntago_api_token";
-const LEGACY_TOKEN_KEY = "nuntago_api_token";
+export type ApiMode = "public" | "operator";
 
-export function getAccessToken(): string {
-  return sessionStorage.getItem(TOKEN_KEY) ?? "";
+let apiMode: ApiMode = "operator";
+
+export function setApiMode(mode: ApiMode): void {
+  apiMode = mode;
 }
 
-export function setAccessToken(token: string): void {
-  sessionStorage.setItem(TOKEN_KEY, token.trim());
+export function getApiMode(): ApiMode {
+  return apiMode;
 }
 
-export function clearAccessToken(): void {
-  sessionStorage.removeItem(TOKEN_KEY);
-  sessionStorage.removeItem(LEGACY_TOKEN_KEY);
+function resolvePath(path: string): string {
+  if (
+    apiMode === "public" &&
+    path.startsWith("/api/") &&
+    path !== "/api/site" &&
+    path !== "/api/health"
+  ) {
+    return `/api/public/${path.slice("/api/".length)}`;
+  }
+  return path;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Content-Type", "application/json");
 
-  const token = getAccessToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-
-  const response = await fetch(path, {
+  const response = await fetch(resolvePath(path), {
     ...init,
     headers
   });
@@ -54,6 +60,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  site: () => request<SiteInfo>("/api/site"),
   meta: () => request<Meta>("/api/meta"),
   dashboard: () => request<DashboardData>("/api/dashboard"),
   leads: (params: { q?: string; status?: string; minScore?: number; limit?: number } = {}) => {
