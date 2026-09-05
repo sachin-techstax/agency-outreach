@@ -761,7 +761,7 @@ def followups() -> dict:
 # Vite development, the frontend runs separately and uses the /api proxy.
 _DIST_DIR = Path(
     os.getenv(
-        "PACTSIGNAL_FRONTEND_DIST",
+        "NUNTAGO_FRONTEND_DIST",
         str(Path(__file__).resolve().parents[1] / "frontend" / "dist"),
     )
 )
