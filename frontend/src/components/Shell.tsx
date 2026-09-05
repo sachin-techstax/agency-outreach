@@ -1,8 +1,7 @@
-import { Activity, LayoutDashboard, LogOut, Radar, Rows3, Send, Sparkles } from "lucide-react";
+import { Activity, ExternalLink, LayoutDashboard, LockKeyhole, Radar, Rows3, Send, Sparkles } from "lucide-react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import { signOutOperator } from "../App";
 
 const nav = [
   { to: "/", label: "Overview", icon: LayoutDashboard },
@@ -14,6 +13,7 @@ const nav = [
 
 export function Shell() {
   const meta = useQuery({ queryKey: ["meta"], queryFn: api.meta });
+  const publicMode = meta.data?.mode === "public" || Boolean(meta.data?.demo_mode);
 
   return (
     <div className="app-shell">
@@ -42,28 +42,33 @@ export function Shell() {
         <div className="system-card">
           <span className="health-dot" />
           <div>
-            <strong>Pipeline healthy</strong>
-            <span>Serper · OpenAI · Gmail</span>
+            <strong>{publicMode ? "Read-only showcase" : "Pipeline healthy"}</strong>
+            <span>{publicMode ? "Fictional portfolio dataset" : "Serper · OpenAI · Gmail"}</span>
           </div>
         </div>
 
         <div className="sidebar-footer">
           <div className="operator-row">
-            <Sparkles size={14} />
-            <strong>Sachin</strong>
+            {publicMode ? <LockKeyhole size={14} /> : <Sparkles size={14} />}
+            <strong>{publicMode ? "Public showcase" : "Sachin"}</strong>
           </div>
-          <span>{meta.data?.demo_mode ? "Demo mode · read-only" : "Private mode"}</span>
-          <button
-            className="sidebar-logout"
-            type="button"
-            onClick={signOutOperator}
+          <span>{publicMode ? "Explore freely · actions disabled" : "Private console · Access protected"}</span>
+          <a
+            className="sidebar-console-link"
+            href={publicMode ? "https://console.nuntago.ergorum.com" : "https://nuntago.ergorum.com"}
           >
-            <LogOut size={12} />
-            Sign out
-          </button>
+            {publicMode ? "Operator console" : "View public showcase"}
+            <ExternalLink size={11} />
+          </a>
         </div>
       </aside>
       <main className="workspace">
+        {publicMode && (
+          <div className="showcase-banner">
+            <LockKeyhole size={13} />
+            <span><strong>Public showcase.</strong> Fictional data, real workflow. All external and persistent actions are disabled.</span>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>
