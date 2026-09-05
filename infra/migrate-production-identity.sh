@@ -51,6 +51,12 @@ for raw in source.read_text(encoding="utf-8").splitlines():
         continue
     key, value = raw.split("=", 1)
     new_key = mapping.get(key, key)
+    if new_key == "DB_PATH":
+        if value in {"agency_outreach.db", "/data/agency_outreach.db"}:
+            value = value.replace("agency_outreach.db", "nuntago.db")
+    if new_key == "LOG_FILE" and value:
+        value = value.replace("agency-outreach.log", "nuntago.log")
+        value = value.replace("agency_outreach.log", "nuntago.log")
     if new_key in seen:
         continue
     seen.add(new_key)
