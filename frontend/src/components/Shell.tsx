@@ -55,7 +55,7 @@ export function Shell() {
           <span>{publicMode ? "Explore freely · actions disabled" : "Private console · Access protected"}</span>
           <a
             className="sidebar-console-link"
-            href={publicMode ? "https://console.nuntago.ergorum.com" : "https://nuntago.ergorum.com"}
+            href={publicMode ? "https://nuntago.ergorum.com" : "https://demo.nuntago.ergorum.com"}
           >
             {publicMode ? "Operator console" : "View public showcase"}
             <ExternalLink size={11} />
