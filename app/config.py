@@ -39,18 +39,9 @@ class Settings:
     gmail_token_file: Path = Path(os.getenv("GMAIL_TOKEN_FILE", "token.json"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
     log_file: str = os.getenv("LOG_FILE", "").strip()
-    # Internal field names intentionally remain pactsignal_* for one compatibility
-    # cycle. NUNTAGO_* is the preferred external configuration contract; the
-    # existing PACTSIGNAL_* variables remain accepted for live deployments.
-    nuntago_demo_mode: bool = _bool_alias(
-        "NUNTAGO_DEMO_MODE", "PACTSIGNAL_DEMO_MODE", False
-    )
-    nuntago_auth_enabled: bool = _bool_alias(
-        "NUNTAGO_AUTH_ENABLED", "PACTSIGNAL_AUTH_ENABLED", False
-    )
-    nuntago_api_token: str = _str_alias(
-        "NUNTAGO_API_TOKEN", "PACTSIGNAL_API_TOKEN"
-    ).strip()
+    nuntago_demo_mode: bool = _bool("NUNTAGO_DEMO_MODE", False)
+    nuntago_auth_enabled: bool = _bool("NUNTAGO_AUTH_ENABLED", False)
+    nuntago_api_token: str = os.getenv("NUNTAGO_API_TOKEN", "").strip()
 
 
 settings = Settings()
