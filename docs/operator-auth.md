@@ -1,62 +1,106 @@
-# Nuntago operator API token
+# Nuntago public showcase and operator authentication
 
-Nuntago private mode uses a single static bearer token for the operator API.
-
-This is intentionally simpler than user accounts or JWT session issuance because
-Nuntago currently has one operator.
+Nuntago exposes two browser surfaces from the same localhost-bound runtime while
+keeping their API boundaries separate.
 
 ```text
-browser UI
-  -> operator enters token once per browser tab/session
-  -> token stored in sessionStorage
-  -> frontend sends Authorization: Bearer <token>
-  -> FastAPI compares it to NUNTAGO_API_TOKEN
-  -> protected /api/* request proceeds
+nuntago.ergorum.com
+  -> public browser showcase
+  -> /api/public/*
+  -> fictional demo data only
+  -> no mutation routes
+
+console.nuntago.ergorum.com
+  -> Cloudflare Access
+  -> /api/*
+  -> live Nuntago database and operator actions
 ```
 
-## Production configuration
+The public host is intentionally useful as portfolio proof: visitors can explore
+the real Nuntago workflow and interface, but the API only serves fictional
+showcase records. Public requests never read the live SQLite database.
+
+## Cloudflare Access
+
+The operator console uses the Access application token injected by Cloudflare in
+the `Cf-Access-Jwt-Assertion` header. Nuntago validates the JWT signature,
+issuer and application audience against Cloudflare's rotating JWK set before
+allowing the operator API request.
+
+Production configuration:
 
 ```dotenv
 NUNTAGO_AUTH_ENABLED=true
+
+NUNTAGO_PUBLIC_HOST=nuntago.ergorum.com
+NUNTAGO_OPERATOR_HOST=console.nuntago.ergorum.com
+
+NUNTAGO_ACCESS_TEAM_DOMAIN=https://<team>.cloudflareaccess.com
+NUNTAGO_ACCESS_AUD=<application-audience-tag>
+NUNTAGO_OPERATOR_EMAIL=<operator-email>
+```
+
+`NUNTAGO_OPERATOR_EMAIL` is an additional origin-side allowlist. Cloudflare
+Access should also have an Allow policy restricted to the operator identity.
+
+The Access signing keys are retrieved from:
+
+```text
+<NUNTAGO_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs
+```
+
+PyJWT caches the remote JWK client. Access key rotation therefore does not
+require hard-coding certificates in the repository.
+
+## Bearer-token fallback
+
+`NUNTAGO_API_TOKEN` remains supported for local tooling and non-browser
+automation. It is no longer part of the browser UI.
+
+```dotenv
 NUNTAGO_API_TOKEN=<high-entropy-secret>
 ```
 
-Generate the token on the server:
+When `NUNTAGO_AUTH_ENABLED=true`, at least one operator authentication method
+must be configured:
 
-```bash
-openssl rand -hex 32
-```
+- Cloudflare Access team domain + application AUD, or
+- a bearer token containing at least 32 characters.
 
-Do not commit the token and do not compile it into the Vite frontend. A token
-embedded in frontend JavaScript is public to anyone who can load the site and
-would provide no meaningful API protection.
+The production browser console should use Cloudflare Access. The bearer token is
+a fallback, not a user-facing login mechanism.
 
-## API contract
+## Public API contract
 
-All `/api/*` endpoints require:
-
-```http
-Authorization: Bearer <NUNTAGO_API_TOKEN>
-```
-
-except:
+These routes are intentionally unauthenticated and demo-only:
 
 ```text
+GET /api/site
+GET /api/public/meta
+GET /api/public/dashboard
+GET /api/public/leads
+GET /api/public/leads/{id}
+GET /api/public/runs
+GET /api/public/runs/{id}
+GET /api/public/followups
 GET /api/health
 ```
 
-Health remains public so deployment and reverse-proxy health checks can work.
+There are no public mutation endpoints. A frontend bug cannot turn the showcase
+into a write-capable client because the public API surface itself has no POST
+routes and never touches the live database.
 
-## Browser behavior
+## Operator API contract
 
-The operator enters the token in the Nuntago unlock screen. The frontend
-stores it in `sessionStorage`, so it survives page reloads in the same tab but
-is not persisted as a long-lived local token. Signing out removes it.
+All normal `/api/*` routes except health/site/public showcase endpoints are
+operator routes. In production they require a valid Cloudflare Access JWT.
+Bearer-token authentication remains accepted as the tooling fallback.
 
 ## Deployment safety
 
-`doctor --strict` treats API-token authentication as required in private mode.
-A production deploy therefore fails readiness if authentication is disabled or
-the configured token is shorter than 32 characters.
+`doctor --strict` requires operator authentication in live mode. A production
+deploy fails readiness if authentication is disabled or neither Cloudflare
+Access nor a valid bearer fallback is configured.
 
-Nuntago is intentionally detached from the Gradewise Caddy stack. A future umbrella-domain proxy can terminate TLS and forward to the localhost-bound Nuntago runtime.
+The runtime remains bound to `127.0.0.1:8080`. Both public and operator
+hostnames should reach it only through Cloudflare Tunnel.
