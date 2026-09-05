@@ -1,7 +1,5 @@
 # Nuntago operator API token
 
-`NUNTAGO_*` is the preferred configuration contract. Existing `PACTSIGNAL_AUTH_ENABLED` and `PACTSIGNAL_API_TOKEN` values remain accepted during the compatibility window.
-
 Nuntago private mode uses a single static bearer token for the operator API.
 
 This is intentionally simpler than user accounts or JWT session issuance because
@@ -61,6 +59,4 @@ is not persisted as a long-lived local token. Signing out removes it.
 A production deploy therefore fails readiness if authentication is disabled or
 the configured token is shorter than 32 characters.
 
-Keep Caddy Basic Auth enabled during rollout. Once the token-authenticated
-Nuntago release is deployed and verified, remove Caddy Basic Auth so the
-normal Nuntago unlock screen is the only access prompt.
+Nuntago is intentionally detached from the Gradewise Caddy stack. A future umbrella-domain proxy can terminate TLS and forward to the localhost-bound Nuntago runtime.

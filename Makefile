@@ -10,40 +10,40 @@ setup:
 	@echo "Setup complete. Fill API keys and profile values in .env, then run: make build"
 
 build:
-	$(COMPOSE) build outreach
+	$(COMPOSE) build nuntago-cli
 
 build-web:
-	$(COMPOSE) build pactsignal-web
+	$(COMPOSE) build nuntago-web
 
 init:
-	$(COMPOSE) run --rm outreach init-db
+	$(COMPOSE) run --rm nuntago-cli init-db
 
 run:
-	$(COMPOSE) run --rm outreach run --limit $(LIMIT)
+	$(COMPOSE) run --rm nuntago-cli run --limit $(LIMIT)
 
 discover:
-	$(COMPOSE) run --rm outreach discover --limit $(LIMIT)
+	$(COMPOSE) run --rm nuntago-cli discover --limit $(LIMIT)
 
 list:
-	$(COMPOSE) run --rm outreach list --status drafted --min-score $(MIN_SCORE)
+	$(COMPOSE) run --rm nuntago-cli list --status drafted --min-score $(MIN_SCORE)
 
 status:
-	$(COMPOSE) run --rm outreach status
+	$(COMPOSE) run --rm nuntago-cli status
 
 doctor:
-	$(COMPOSE) run --rm outreach doctor
+	$(COMPOSE) run --rm nuntago-cli doctor
 
 cli:
-	$(COMPOSE) run --rm outreach --help
+	$(COMPOSE) run --rm nuntago-cli --help
 
 web:
-	$(COMPOSE) up pactsignal-web
+	$(COMPOSE) up nuntago-web
 
 demo-web:
-	$(COMPOSE) run --rm --service-ports -e PACTSIGNAL_DEMO_MODE=true pactsignal-web
+	$(COMPOSE) run --rm --service-ports -e NUNTAGO_DEMO_MODE=true nuntago-web
 
 test:
 	$(COMPOSE) run --rm --entrypoint pytest outreach -q
 
 help:
-	$(COMPOSE) run --rm outreach --help
+	$(COMPOSE) run --rm nuntago-cli --help

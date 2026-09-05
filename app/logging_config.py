@@ -1,4 +1,4 @@
-"""Central logging configuration for the agency outreach pipeline.
+"""Central logging configuration for the Nuntago pipeline.
 
 Uses the Python standard library ``logging`` module. Operational diagnostics
 must go through :func:`get_logger` (or ``logging`` directly) rather than ad-hoc
@@ -76,7 +76,7 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
     # --verbose) is clean. We deliberately leave foreign handlers (such as
     # pytest's LogCaptureHandler) in place so test fixtures keep working.
     for h in list(root.handlers):
-        if getattr(h, "_agency_outreach_owned", False):
+        if getattr(h, "_nuntago_owned", False):
             root.removeHandler(h)
             try:
                 h.close()
@@ -89,7 +89,7 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
     console = logging.StreamHandler()
     console.setLevel(level_int)
     console.setFormatter(formatter)
-    console._agency_outreach_owned = True  # type: ignore[attr-defined]
+    console._nuntago_owned = True  # type: ignore[attr-defined]
     root.addHandler(console)
 
     if file_path:
@@ -103,7 +103,7 @@ def configure_logging(level: str | int | None = None, log_file: str | None = Non
             # file-specific level can be added in the future if needed.
             file_handler.setLevel(level_int)
             file_handler.setFormatter(formatter)
-            file_handler._agency_outreach_owned = True  # type: ignore[attr-defined]
+            file_handler._nuntago_owned = True  # type: ignore[attr-defined]
             root.addHandler(file_handler)
         except Exception as exc:
             # File logging is optional; keep console logging active and emit a

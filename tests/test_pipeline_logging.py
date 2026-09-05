@@ -399,9 +399,9 @@ def test_file_logging_failure_emits_warning(tmp_path, caplog):
     assert bad_path in messages
     # Console handler must still be active
     root = logging.getLogger()
-    assert any(getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers)
+    assert any(getattr(h, "_nuntago_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in root.handlers)
     # We must not have added a NullHandler as a substitute for the failed file handler
-    assert not any(getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.NullHandler) for h in root.handlers)
+    assert not any(getattr(h, "_nuntago_owned", False) and isinstance(h, logging.NullHandler) for h in root.handlers)
 
 
 # ---------------------------------------------------------------------------

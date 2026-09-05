@@ -75,7 +75,7 @@ def _frontend_dist() -> Path:
 
 
 def _require_private_mode(action: str) -> None:
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         # This is an execution-policy block, not an argument-parse failure.
         # Print a stable operator-facing reason before exiting so terminal users
         # and CliRunner/automation receive the same message on stdout.
@@ -146,7 +146,7 @@ def status_cmd() -> None:
     integrations = Table(title="Runtime", show_lines=False)
     integrations.add_column("Component")
     integrations.add_column("State")
-    integrations.add_row("Mode", "demo / read-only" if settings.pactsignal_demo_mode else "private")
+    integrations.add_row("Mode", "demo / read-only" if settings.nuntago_demo_mode else "private")
     integrations.add_row("Serper", "configured" if settings.serper_api_key else "missing")
     integrations.add_row(
         "OpenAI",
@@ -214,13 +214,13 @@ def doctor_cmd(
             False,
         )
     )
-    if settings.pactsignal_demo_mode:
+    if settings.nuntago_demo_mode:
         auth_ok = True
         auth_detail = "not required in demo mode"
         auth_required = False
-    elif not settings.pactsignal_auth_enabled:
+    elif not settings.nuntago_auth_enabled:
         auth_ok = False
-        auth_detail = "NUNTAGO_AUTH_ENABLED is false (legacy PACTSIGNAL_AUTH_ENABLED is also supported)"
+        auth_detail = "NUNTAGO_AUTH_ENABLED is false"
         auth_required = True
     else:
         try:
@@ -294,10 +294,9 @@ def serve_cmd(
     """Serve the Nuntago FastAPI operator API and compiled React UI."""
     if demo:
         os.environ["NUNTAGO_DEMO_MODE"] = "true"
-        os.environ["PACTSIGNAL_DEMO_MODE"] = "true"
-        object.__setattr__(settings, "pactsignal_demo_mode", True)
+        object.__setattr__(settings, "nuntago_demo_mode", True)
 
-    effective_demo = settings.pactsignal_demo_mode
+    effective_demo = settings.nuntago_demo_mode
     dist = _frontend_dist()
 
     console.print(f"[bold]{PRODUCT_NAME}[/bold] — {PRODUCT_DESCRIPTOR}")
@@ -307,7 +306,7 @@ def serve_cmd(
         f"UI:    {'compiled React build found' if dist.exists() else 'API only; frontend/dist not found'}"
     )
 
-    if not effective_demo and not settings.pactsignal_auth_enabled:
+    if not effective_demo and not settings.nuntago_auth_enabled:
         console.print()
         console.print(
             "[yellow]Warning: private mode API token authentication is disabled. "

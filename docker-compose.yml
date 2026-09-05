@@ -1,16 +1,16 @@
 services:
-  outreach:
+  nuntago-cli:
     build:
       context: .
       dockerfile: Dockerfile
-    image: agency-outreach:${DEPLOY_SHA:-local}
+    image: nuntago-cli:${DEPLOY_SHA:-local}
     env_file:
       - .env
     environment:
-      DB_PATH: /data/agency_outreach.db
+      DB_PATH: /data/nuntago.db
       GMAIL_CLIENT_SECRET: /secrets/client_secret.json
       GMAIL_TOKEN_FILE: /secrets/token.json
-      PACTSIGNAL_DEMO_MODE: ${PACTSIGNAL_DEMO_MODE:-false}
+      NUNTAGO_DEMO_MODE: ${NUNTAGO_DEMO_MODE:-false}
     volumes:
       - ./data:/data
       - ./secrets:/secrets
@@ -21,33 +21,22 @@ services:
     tty: true
     command: ["--help"]
 
-  pactsignal-web:
+  nuntago-web:
     build:
       context: .
       dockerfile: Dockerfile.web
-    image: pactsignal-web:${DEPLOY_SHA:-local}
+    image: nuntago-web:${DEPLOY_SHA:-local}
     env_file:
       - .env
     environment:
-      DB_PATH: /data/agency_outreach.db
+      DB_PATH: /data/nuntago.db
       GMAIL_CLIENT_SECRET: /secrets/client_secret.json
       GMAIL_TOKEN_FILE: /secrets/token.json
-      PACTSIGNAL_DEMO_MODE: ${PACTSIGNAL_DEMO_MODE:-false}
+      NUNTAGO_DEMO_MODE: ${NUNTAGO_DEMO_MODE:-false}
     volumes:
       - ./data:/data
       - ./secrets:/secrets
     user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
-    # Safe-by-default host binding. Put a reverse proxy/auth layer in front
-    # before exposing private mode beyond localhost.
     ports:
       - "127.0.0.1:8080:8080"
-    networks:
-      default:
-      pactsignal_proxy:
-        aliases:
-          - pactsignal-web
     restart: unless-stopped
-
-networks:
-  pactsignal_proxy:
-    external: true

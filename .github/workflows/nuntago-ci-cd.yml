@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pactsignal-${{ github.workflow }}-${{ github.ref }}
+  group: nuntago-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +29,6 @@ jobs:
           set -Eeuo pipefail
           cp .env.example .env
           mkdir -p data secrets
-          docker network inspect pactsignal_proxy >/dev/null 2>&1 || docker network create pactsignal_proxy >/dev/null
           export LOCAL_UID="$(id -u)"
           export LOCAL_GID="$(id -g)"
           echo "LOCAL_UID=$LOCAL_UID" >> "$GITHUB_ENV"
@@ -41,26 +40,27 @@ jobs:
           set -Eeuo pipefail
           bash -n infra/deploy-release.sh
           bash -n infra/bootstrap-hetzner.sh
+          bash -n infra/migrate-production-identity.sh
           docker compose config >/dev/null
 
       - name: Build CLI and web images
         shell: bash
         run: |
           set -Eeuo pipefail
-          docker compose build outreach pactsignal-web
+          docker compose build nuntago-cli nuntago-web
 
       - name: Run full Python suite
         shell: bash
         run: |
           set -Eeuo pipefail
-          docker compose run --rm --entrypoint pytest outreach -q
+          docker compose run --rm --entrypoint pytest nuntago-cli -q
 
       - name: Smoke-test Nuntago demo runtime
         shell: bash
         run: |
           set -Eeuo pipefail
-          export PACTSIGNAL_DEMO_MODE=true
-          docker compose up -d pactsignal-web
+          export NUNTAGO_DEMO_MODE=true
+          docker compose up -d nuntago-web
 
           cleanup() {
             docker compose down --remove-orphans || true
@@ -129,7 +129,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          archive="$RUNNER_TEMP/pactsignal-${GITHUB_SHA}.tar.gz"
+          archive="$RUNNER_TEMP/nuntago-${GITHUB_SHA}.tar.gz"
           tar \
             --exclude='./.git' \
             --exclude='./.env' \
@@ -147,7 +147,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           port="${HETZNER_SSH_PORT:-22}"
-          remote="/tmp/pactsignal-${GITHUB_SHA}.tar.gz"
+          remote="/tmp/nuntago-${GITHUB_SHA}.tar.gz"
           scp \
             -i "$HOME/.ssh/id_ed25519" \
             -P "$port" \
@@ -167,28 +167,27 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             "$HETZNER_USER@$HETZNER_HOST" \
-            "APP_ROOT='/srv/agency-outreach' RELEASE_SHA='${GITHUB_SHA}' ARCHIVE='/tmp/pactsignal-${GITHUB_SHA}.tar.gz' bash -s" <<'REMOTE'
+            "APP_ROOT='/srv/nuntago' RELEASE_SHA='${GITHUB_SHA}' ARCHIVE='/tmp/nuntago-${GITHUB_SHA}.tar.gz' bash -s" <<'REMOTE'
           set -Eeuo pipefail
 
           : "${APP_ROOT:?APP_ROOT is required}"
           : "${RELEASE_SHA:?RELEASE_SHA is required}"
           : "${ARCHIVE:?ARCHIVE is required}"
 
-          releases="$APP_ROOT/releases"
           shared="$APP_ROOT/shared"
-          release="$releases/$RELEASE_SHA"
+          test -f "$shared/.env" || {
+            echo "Missing $shared/.env. Run the Nuntago identity migration/bootstrap before merging this release." >&2
+            exit 1
+          }
 
+          releases="$APP_ROOT/releases"
+          release="$releases/$RELEASE_SHA"
           mkdir -p "$releases" "$shared/data" "$shared/secrets"
           rm -rf "$release"
           mkdir -p "$release"
 
           tar -xzf "$ARCHIVE" -C "$release"
           rm -f "$ARCHIVE"
-
-          test -f "$shared/.env" || {
-            echo "Missing $shared/.env. Complete the one-time server bootstrap first." >&2
-            exit 1
-          }
 
           ln -sfn "$shared/.env" "$release/.env"
           ln -sfn "$shared/data" "$release/data"

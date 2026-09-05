@@ -16,14 +16,14 @@ from app.config import settings
 def test_configure_logging_sets_level():
     configure_logging(level="DEBUG")
     root = logging.getLogger()
-    console_handler = next(h for h in root.handlers if getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
+    console_handler = next(h for h in root.handlers if getattr(h, "_nuntago_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
     assert console_handler.level == logging.DEBUG
 
 
 def test_configure_logging_default_info():
     configure_logging(level="INFO")
     root = logging.getLogger()
-    console_handler = next(h for h in root.handlers if getattr(h, "_agency_outreach_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
+    console_handler = next(h for h in root.handlers if getattr(h, "_nuntago_owned", False) and isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler))
     assert console_handler.level == logging.INFO
 
 

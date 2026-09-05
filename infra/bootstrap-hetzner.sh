@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_ROOT="${APP_ROOT:-/srv/agency-outreach}"
+APP_ROOT="${APP_ROOT:-/srv/nuntago}"
 TARGET_USER="${SUDO_USER:-$USER}"
 
 command -v docker >/dev/null 2>&1 || {
@@ -17,10 +17,7 @@ command -v curl >/dev/null 2>&1 || {
   exit 1
 }
 
-docker network inspect pactsignal_proxy >/dev/null 2>&1 || docker network create pactsignal_proxy >/dev/null
-
-sudo mkdir -p   "$APP_ROOT/releases"   "$APP_ROOT/shared/data"   "$APP_ROOT/shared/secrets"
-
+sudo mkdir -p "$APP_ROOT/releases" "$APP_ROOT/shared/data" "$APP_ROOT/shared/secrets"
 sudo chown -R "$TARGET_USER":"$TARGET_USER" "$APP_ROOT"
 
 if [ ! -f "$APP_ROOT/shared/.env" ]; then
@@ -36,7 +33,9 @@ DISCOVERY_LIMIT=15
 FOLLOWUP_DAYS=4
 LOG_LEVEL=INFO
 LOG_FILE=
-PACTSIGNAL_DEMO_MODE=false
+NUNTAGO_DEMO_MODE=false
+NUNTAGO_AUTH_ENABLED=true
+NUNTAGO_API_TOKEN=
 ENV
   chmod 600 "$APP_ROOT/shared/.env"
   echo "Created $APP_ROOT/shared/.env"
@@ -57,7 +56,4 @@ Next:
 3. Ensure the deployment SSH user can run Docker without sudo:
    docker ps
    docker compose version
-
-4. Configure the GitHub Actions secrets documented in:
-   docs/hetzner-cicd.md
 EOF

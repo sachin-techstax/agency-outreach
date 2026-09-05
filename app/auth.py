@@ -6,10 +6,10 @@ from .config import settings
 
 
 def validate_auth_config() -> None:
-    if not settings.pactsignal_auth_enabled:
+    if not settings.nuntago_auth_enabled:
         return
-    if len(settings.pactsignal_api_token) < 32:
-        raise RuntimeError("NUNTAGO_API_TOKEN (or legacy PACTSIGNAL_API_TOKEN) must contain at least 32 characters")
+    if len(settings.nuntago_api_token) < 32:
+        raise RuntimeError("NUNTAGO_API_TOKEN must contain at least 32 characters")
 
 
 def bearer_token_from_header(authorization: str | None) -> str:
@@ -23,7 +23,7 @@ def bearer_token_from_header(authorization: str | None) -> str:
 
 def valid_api_token(authorization: str | None) -> bool:
     provided = bearer_token_from_header(authorization)
-    expected = settings.pactsignal_api_token
+    expected = settings.nuntago_api_token
     if not provided or not expected:
         return False
     return hmac.compare_digest(provided, expected)

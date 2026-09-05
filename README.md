@@ -6,7 +6,7 @@ Nuntago is a human-approved partner discovery and outreach platform for finding 
 
 It combines structured discovery, deterministic commercial-fit qualification, website research, AI-assisted personalization, persistent lead state, and a React operator console. Nuntago intentionally **does not auto-send cold email**. Human approval remains the boundary before Gmail draft creation and sending remains manual.
 
-The repository name, SQLite filename, Docker service/project names, proxy network, and server release path intentionally keep their existing identifiers for migration stability. Nuntago is the product name. The legacy `./pactsignal` CLI alias and `PACTSIGNAL_*` environment variables remain supported during the compatibility window.
+The repository, runtime, deployment paths and operator tooling all use the Nuntago identity.
 
 ## What it does
 
@@ -38,14 +38,13 @@ Local entry points:
 
 ```bash
 ./nuntago --help
-./pactsignal --help  # legacy compatibility alias
 python -m app --help
 ```
 
 Docker entry point:
 
 ```bash
-docker compose run --rm outreach --help
+docker compose run --rm nuntago-cli --help
 ```
 
 Useful operator commands:
@@ -158,8 +157,8 @@ This makes it safe to show Nuntago publicly without exposing prospect data or tr
 Build and start only the Nuntago web service:
 
 ```bash
-docker compose build pactsignal-web
-docker compose up pactsignal-web
+docker compose build nuntago-web
+docker compose up nuntago-web
 ```
 
 The Compose service binds to localhost by default:
@@ -205,8 +204,8 @@ Docker Compose is the recommended runtime.
 ## 1. Clone and configure
 
 ```bash
-git clone https://github.com/sachin-techstax/agency-outreach.git
-cd agency-outreach
+git clone https://github.com/sachin-techstax/nuntago.git
+cd nuntago
 
 cp .env.example .env
 mkdir -p data secrets
@@ -246,19 +245,19 @@ make build
 ## 3. Initialize the database
 
 ```bash
-docker compose run --rm outreach init-db
+docker compose run --rm nuntago-cli init-db
 ```
 
 The SQLite database is persisted at:
 
 ```text
-./data/agency_outreach.db
+./data/nuntago.db
 ```
 
 ## 4. Run discovery and qualification
 
 ```bash
-docker compose run --rm outreach run --limit 15
+docker compose run --rm nuntago-cli run --limit 15
 ```
 
 Or:
@@ -270,13 +269,13 @@ make run LIMIT=15
 The pipeline prints a startup banner and live stage-by-stage progress so you can see exactly what it is doing:
 
 ```text
-Agency Outreach
----------------
+Nuntago
+-------
 Limit:            15
 Minimum score:    70
 OpenAI:           enabled
 Serper:           configured
-Database:         /data/agency_outreach.db
+Database:         /data/nuntago.db
 Log level:        INFO
 
 2026-09-02 21:58:11 | INFO  | pipeline | Starting agency discovery. Target: 15
@@ -323,7 +322,7 @@ If `SERPER_API_KEY` is missing, the `run` command fails immediately with a clear
 To see DEBUG-level detail (every page fetched, HTTP status codes, response lengths, JSON recovery, DB inserts/updates) for a single run without editing `.env`:
 
 ```bash
-docker compose run --rm outreach run --limit 1 --verbose
+docker compose run --rm nuntago-cli run --limit 1 --verbose
 ```
 
 Alternatively, set `LOG_LEVEL=DEBUG` in `.env` or pass it explicitly to the container:
@@ -337,13 +336,13 @@ docker compose run --rm -e LOG_LEVEL=DEBUG outreach run --limit 1
 Set `LOG_FILE` in `.env` to mirror logs to a rotating file (5 MB per file, 3 backups):
 
 ```env
-LOG_FILE=/data/agency-outreach.log
+LOG_FILE=/data/nuntago.log
 ```
 
 When enabled inside Docker, the log file persists on the host at:
 
 ```text
-./data/agency-outreach.log
+./data/nuntago.log
 ```
 
 If `LOG_FILE` is blank, only console output is produced.
@@ -362,15 +361,15 @@ Logs never print API keys, OAuth tokens, or full scraped website text.
 ## 5. Review leads
 
 ```bash
-docker compose run --rm outreach list --status drafted --min-score 70
-docker compose run --rm outreach show 12
+docker compose run --rm nuntago-cli list --status drafted --min-score 70
+docker compose run --rm nuntago-cli show 12
 ```
 
 Approve or reject:
 
 ```bash
-docker compose run --rm outreach approve 12
-docker compose run --rm outreach reject 13
+docker compose run --rm nuntago-cli approve 12
+docker compose run --rm nuntago-cli reject 13
 ```
 
 ## Gmail drafts with Docker
@@ -390,7 +389,7 @@ The Gmail integration uses the `gmail.compose` OAuth scope and only creates unse
 Then run:
 
 ```bash
-docker compose run --rm outreach gmail-drafts --limit 10
+docker compose run --rm nuntago-cli gmail-drafts --limit 10
 ```
 
 The Compose service uses host networking because Google desktop OAuth starts a temporary localhost callback server. On Linux, copy the authorization URL printed in the terminal into your normal browser if the container cannot open it automatically.
@@ -406,14 +405,14 @@ Approved leads with public email addresses become Gmail drafts. Review and send 
 After sending a draft:
 
 ```bash
-docker compose run --rm outreach mark-sent 12
+docker compose run --rm nuntago-cli mark-sent 12
 ```
 
 Check follow-ups:
 
 ```bash
-docker compose run --rm outreach due-followups
-docker compose run --rm outreach followup-draft 12
+docker compose run --rm nuntago-cli due-followups
+docker compose run --rm nuntago-cli followup-draft 12
 ```
 
 ## Export
@@ -421,7 +420,7 @@ docker compose run --rm outreach followup-draft 12
 Persist exports in `data/`:
 
 ```bash
-docker compose run --rm outreach export --path /data/leads.csv
+docker compose run --rm nuntago-cli export --path /data/leads.csv
 ```
 
 The host file will be available at:
@@ -471,7 +470,7 @@ make help
 A cron job can automate only the safe discovery/drafting stage:
 
 ```cron
-0 8 * * 1-5 cd /path/to/agency-outreach && docker compose run --rm outreach run --limit 15
+0 8 * * 1-5 cd /path/to/nuntago && docker compose run --rm nuntago-cli run --limit 15
 ```
 
 Do not schedule Gmail draft creation or sending unless you intentionally want that behavior.

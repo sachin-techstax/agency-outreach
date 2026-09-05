@@ -23,19 +23,6 @@ def _bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _bool_alias(primary: str, legacy: str, default: bool = False) -> bool:
-    if os.getenv(primary) is not None:
-        return _bool(primary, default)
-    return _bool(legacy, default)
-
-
-def _str_alias(primary: str, legacy: str, default: str = "") -> str:
-    value = os.getenv(primary)
-    if value is None:
-        value = os.getenv(legacy, default)
-    return value
-
-
 @dataclass(frozen=True)
 class Settings:
     serper_api_key: str = os.getenv("SERPER_API_KEY", "")
@@ -47,7 +34,7 @@ class Settings:
     min_score: int = _int("MIN_SCORE", 70)
     discovery_limit: int = _int("DISCOVERY_LIMIT", 15)
     followup_days: int = _int("FOLLOWUP_DAYS", 4)
-    db_path: Path = Path(os.getenv("DB_PATH", "agency_outreach.db"))
+    db_path: Path = Path(os.getenv("DB_PATH", "nuntago.db"))
     gmail_client_secret: Path = Path(os.getenv("GMAIL_CLIENT_SECRET", "client_secret.json"))
     gmail_token_file: Path = Path(os.getenv("GMAIL_TOKEN_FILE", "token.json"))
     log_level: str = os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO"
@@ -55,13 +42,13 @@ class Settings:
     # Internal field names intentionally remain pactsignal_* for one compatibility
     # cycle. NUNTAGO_* is the preferred external configuration contract; the
     # existing PACTSIGNAL_* variables remain accepted for live deployments.
-    pactsignal_demo_mode: bool = _bool_alias(
+    nuntago_demo_mode: bool = _bool_alias(
         "NUNTAGO_DEMO_MODE", "PACTSIGNAL_DEMO_MODE", False
     )
-    pactsignal_auth_enabled: bool = _bool_alias(
+    nuntago_auth_enabled: bool = _bool_alias(
         "NUNTAGO_AUTH_ENABLED", "PACTSIGNAL_AUTH_ENABLED", False
     )
-    pactsignal_api_token: str = _str_alias(
+    nuntago_api_token: str = _str_alias(
         "NUNTAGO_API_TOKEN", "PACTSIGNAL_API_TOKEN"
     ).strip()
 
